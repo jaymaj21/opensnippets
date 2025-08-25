@@ -1,0 +1,115 @@
+# --- Mini expect-less controller --------------------------------------------
+# Public procs: spawn, send, kill
+# Tunables:
+#   ::pexp::quiet_ms   - stop draining after this much silence (default 200)
+#   ::pexp::after_ms   - absolute cap for a drain after send (default 3000)
+#   ::pexp::autonewline- append "\n" to command if missing (default 1)
+#   ::pexp::echo       - mirror child output to our console (default 1)
+
+namespace eval ::pexp {
+    variable chans
+    array set chans {}
+
+    variable quiet_ms 200
+    variable after_ms 3000
+    variable autonewline 1
+    variable echo 1
+}
+
+# spawn cmd args...  -> returns pid
+proc ::pexp::spawn {args} {
+    variable chans
+    # Use a two-way pipe; merge stderr into stdout portably by asking the shell
+    # If you prefer not to involve a shell, pass full redirection yourself.
+    set cmd [join $args " "]
+    set ch [open |$cmd r+]
+    fconfigure $ch -blocking 0 -buffering none -translation binary
+    # Record by PID (last element is the final stage for pipelines)
+    set pid [lindex [pid $ch] end]
+    set chans($pid) $ch
+    return $pid
+}
+
+# Internal: drain available output from channel until quiet or deadline
+proc ::pexp::_drain {ch} {
+    variable quiet_ms
+    variable after_ms
+    variable echo
+
+    set deadline      [expr {[clock milliseconds] + $after_ms}]
+    set lastActivity  [clock milliseconds]
+    set captured      ""
+
+    while { [clock milliseconds] < $deadline } {
+        if {[eof $ch]} {
+            # Consume any remaining bytes before EOF flags true
+            set chunk [read $ch]
+            if {$chunk ne ""} {
+                append captured $chunk
+                if {$echo} { puts -nonewline $chunk; flush stdout }
+            }
+            break
+        }
+        # Nonblocking read: returns immediately with any available bytes
+        set chunk [read $ch]
+        if {$chunk ne ""} {
+            append captured $chunk
+            if {$echo} { puts -nonewline $chunk; flush stdout }
+            set lastActivity [clock milliseconds]
+        } else {
+            # Nothing arrived: stop if we've been quiet long enough
+            if {[expr {[clock milliseconds] - $lastActivity}] >= $quiet_ms} {
+                break
+            }
+            after 10
+        }
+    }
+    return $captured
+}
+
+# send pid commandString  -> prints child's response and returns it
+proc ::pexp::send {pid command} {
+    variable chans
+    variable autonewline
+    if {![info exists chans($pid)]} {
+        error "send: unknown pid $pid"
+    }
+    set ch $chans($pid)
+
+    # Auto append newline unless present
+    if {$autonewline && ![string match *\n $command]} {
+        append command "\n"
+    }
+
+    # Write and flush to child
+    puts -nonewline $ch $command
+    flush $ch
+
+    # Drain immediate response
+    return [::pexp::_drain $ch]
+}
+
+# kill pid  -> best-effort terminate and cleanup
+proc ::pexp::kill {pid} {
+    variable chans
+    # Try to terminate the process nicely; fall back to force on Windows
+    if {$::tcl_platform(platform) eq "windows"} {
+        catch {exec taskkill /PID $pid /T /F} _
+    } else {
+        catch {exec kill -TERM $pid} _
+    }
+    # Close channel if we still have it
+    if {[info exists chans($pid)]} {
+        catch {close $chans($pid)} _
+        unset chans($pid)
+    }
+}
+
+# --- Optional global aliases (avoid if Tk's "send" exists) -------------------
+# We only create a global "send" if it wouldn't clash with Tk.
+if {![llength [info commands ::send]]} {
+    proc ::send {pid command} { ::pexp::send $pid $command }
+}
+proc ::spawn {args} { uplevel 1 [list ::pexp::spawn {*}$args] }
+proc ::kill  {pid}   { ::pexp::kill $pid }
+# -----------------------------------------------------------------------------

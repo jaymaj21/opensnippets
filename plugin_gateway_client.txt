@@ -1,0 +1,76 @@
+# gateway_client.tcl
+# Single public function: ::gwc::request host port command ?timeout_ms?
+# Returns the response string from the gateway (or throws on timeout).
+
+namespace eval ::gwc { variable seq 0 }
+
+# Internal: readable handler (binds to fully-qualified vars)
+proc ::gwc::_onread {sock doneVar dataVar} {
+    upvar #0 $doneVar done
+    upvar #0 $dataVar data
+    if {[eof $sock]} {
+        set chunk [read $sock]
+        if {$chunk ne ""} { append data $chunk }
+        set done 1
+        return
+    }
+    # Drain anything currently available (non-blocking)
+    set chunk [read $sock]
+    if {$chunk ne ""} { append data $chunk }
+}
+
+# Public: connect, send, (half-)close write, read to EOF, return payload
+proc ::gwc::request {host port command {timeout_ms 10000}} {
+    # Open socket
+    set sock [socket $host $port]
+    fconfigure $sock -translation binary -buffering none -blocking 0
+
+    # Send payload (append newline for server convenience)
+    if {![string match *\n $command]} { append command "\n" }
+    puts -nonewline $sock $command
+    flush $sock
+
+    # Try to half-close write so server sees EOF immediately
+    set halfClosed 0
+    if {[llength [info commands chan]] && ![catch {chan close -write $sock}]} { set halfClosed 1 }
+    if {!$halfClosed} { catch {close $sock write} }
+
+    # Prepare fully-qualified per-call vars
+    set id [incr ::gwc::seq]
+    set doneVar ::gwc::done_$id
+    set dataVar ::gwc::data_$id
+    set $doneVar 0
+    set $dataVar ""
+
+    # Start reading
+    fileevent $sock readable [list ::gwc::_onread $sock $doneVar $dataVar]
+
+    # Safety timeout
+    set timerId [after $timeout_ms [list set $doneVar TIMEOUT]]
+    vwait $doneVar
+    catch {after cancel $timerId}
+    fileevent $sock readable {}
+
+    # Close now (ok if already half-closed)
+    catch {close $sock}
+
+    if {[set $doneVar] eq "TIMEOUT"} {
+        error "gateway request timed out after ${timeout_ms}ms"
+    }
+    set result [set $dataVar]
+    catch {unset $doneVar}
+    catch {unset $dataVar}
+    return $result
+}
+
+# ---- Example CLI usage ----
+if {[info exists argv0] && [file tail $argv0] eq [file tail [info script]]} {
+    if {[llength $argv] < 3} {
+        puts stderr "Usage: tclsh gateway_client.tcl HOST PORT COMMAND"
+        exit 2
+    }
+    set host [lindex $argv 0]
+    set port [lindex $argv 1]
+    set cmd  [join [lrange $argv 2 end] " "]
+    puts  [::gwc::request $host $port $cmd]
+}

@@ -1,0 +1,284 @@
+#!/usr/bin/env tclsh
+# gateway.tcl — Single-child, stateless request/response gateway over TCP.
+# One TCP connection = one request. Client sends bytes, then closes (or times out).
+# Server forwards to the child's stdin, drains child's stdout briefly, replies, closes.
+
+# ---------------------- Config ----------------------
+namespace eval ::gw {
+    # Listen port (must be <= 65535)
+    variable port 19898
+
+    # Program to spawn (override via ::gw::start args or CLI)
+    variable cmd {python -i}
+
+    # Drain policy after writing to child:
+    variable quiet_ms 200      ;# stop when no new bytes for this long
+    variable after_ms 3000     ;# absolute cap per request
+    variable autonewline 1     ;# append "\n" to request if missing
+    variable echo_local 0      ;# mirror child output on server console (debug)
+
+    # Per-connection read timeout (max time client has to finish sending)
+    variable conn_timeout_ms 5000
+
+    # Internal state
+    variable child_ch ""
+    variable child_pid ""
+    variable srv_sock ""
+    variable queue {}
+    variable busy 0
+    variable clients
+    array set clients {}
+}
+
+# ---------------------- Child spawn/kill ----------------------
+proc ::gw::spawn_child {args} {
+    variable child_ch
+    variable child_pid
+    variable cmd
+
+    if {[llength $args] > 0} {
+        set cmd $args
+    }
+
+    if {$child_ch ne ""} {
+        return
+    }
+
+    # Bidirectional pipe to child (stdout only; stderr not merged by default)
+    # If you must merge stderr, run via shell with 2>&1.
+    set child_ch [open |[join $cmd " "] r+]
+    fconfigure $child_ch -blocking 0 -buffering none -translation binary
+
+    # PID of the last stage (if pipeline)
+    set child_pid [lindex [pid $child_ch] end]
+    puts stderr "gw: spawned child pid=$child_pid cmd={[join $cmd " "]}"
+}
+
+proc ::gw::kill_child {} {
+    variable child_ch
+    variable child_pid
+    if {$child_ch eq ""} { return }
+    catch { close $child_ch }
+    set child_ch ""
+    set child_pid ""
+}
+
+# ---------------------- Drain child's stdout ----------------------
+proc ::gw::_drain_child {} {
+    variable child_ch
+    variable quiet_ms
+    variable after_ms
+    variable echo_local
+
+    if {$child_ch eq ""} {
+        return "ERROR: child not running\n"
+    }
+
+    set deadline     [expr {[clock milliseconds] + $after_ms}]
+    set lastActivity [clock milliseconds]
+    set captured     ""
+
+    while {[clock milliseconds] < $deadline} {
+        if {[eof $child_ch]} {
+            set chunk [read $child_ch]
+            if {$chunk ne ""} {
+                append captured $chunk
+                if {$echo_local} { puts -nonewline $chunk; flush stdout }
+            }
+            break
+        }
+        set chunk [read $child_ch]     ;# non-blocking
+        if {$chunk ne ""} {
+            append captured $chunk
+            if {$echo_local} { puts -nonewline $chunk; flush stdout }
+            set lastActivity [clock milliseconds]
+        } else {
+            if {[expr {[clock milliseconds] - $lastActivity}] >= $quiet_ms} {
+                break
+            }
+            after 10
+        }
+    }
+    return $captured
+}
+
+# ---------------------- Request queue (serialize child access) ----------------------
+proc ::gw::enqueue {sock payload} {
+    variable queue
+    lappend queue [list $sock $payload]
+    ::gw::maybe_process
+}
+
+proc ::gw::maybe_process {} {
+    variable busy
+    if {$busy} return
+    set busy 1
+    after 0 ::gw::process_next
+}
+
+proc ::gw::process_next {} {
+    variable queue
+    variable busy
+    variable child_ch
+    variable autonewline
+
+    if {[llength $queue] == 0} {
+        set busy 0
+        return
+    }
+
+    # Dequeue next job
+    set job [lindex $queue 0]
+    set queue [lrange $queue 1 end]
+    lassign $job sock payload
+
+    # Ensure child exists
+    if {$child_ch eq ""} {
+        set resp "ERROR: child not running\n"
+    } else {
+        # Prepare command for child
+        set tosend $payload
+        if {$autonewline && ![string match *\n $tosend]} {
+            append tosend "\n"
+        }
+
+        # Write to child
+        set writeErr ""
+        if {[catch {
+            puts -nonewline $child_ch $tosend
+            flush $child_ch
+        } writeErr]} {
+            set resp "ERROR: failed writing to child: $writeErr\n"
+        } else {
+            # Drain child's immediate response
+            set resp [::gw::_drain_child]
+			puts "Response from child : $resp";
+        }
+    }
+
+    # Reliable send back to client: force blocking to deliver all bytes
+    set sendErr ""
+    if {[catch {
+        fconfigure $sock -blocking 1 -translation binary -buffering none
+        puts -nonewline $sock $resp
+        flush $sock
+        close $sock
+    } sendErr]} {
+        puts stderr "gw: write error to client: $sendErr"
+        catch {close $sock}
+    }
+
+    # Process next queued request
+    after 0 ::gw::process_next
+}
+
+# ---------------------- Server & client handlers ----------------------
+proc ::gw::accept {sock addr rport} {
+    variable clients
+    variable conn_timeout_ms
+
+    fconfigure $sock -blocking 0 -translation binary -buffering none
+
+    # Track per-connection state in a dict
+    dict set clients($sock) buf ""
+    dict set clients($sock) addr $addr
+    dict set clients($sock) rport $rport
+
+    # Timeout to guard clients that don't half-close
+    set tid [after $conn_timeout_ms [list ::gw::client_timeout $sock]]
+    dict set clients($sock) timer $tid
+
+    fileevent $sock readable [list ::gw::client_readable $sock]
+}
+
+proc ::gw::client_readable {sock} {
+    variable clients
+    if {![info exists clients($sock)]} { return }
+
+    if {[eof $sock]} {
+        # Finalize request on EOF
+        set state $clients($sock)
+        catch {after cancel [dict get $state timer]}
+        fileevent $sock readable {}
+        set payload [dict get $state buf]
+        ::gw::enqueue $sock $payload
+        unset clients($sock)
+        return
+    }
+
+    set chunk [read $sock]
+    if {$chunk eq ""} { return }
+
+    # Append to buffer and refresh timeout
+    set state $clients($sock)
+    catch {after cancel [dict get $state timer]}
+    dict set state buf [dict get $state buf]$chunk
+    set tid [after $::gw::conn_timeout_ms [list ::gw::client_timeout $sock]]
+    dict set state timer $tid
+    set clients($sock) $state
+}
+
+proc ::gw::client_timeout {sock} {
+    variable clients
+    if {![info exists clients($sock)]} { return }
+    set state $clients($sock)
+    fileevent $sock readable {}
+    catch {after cancel [dict get $state timer]}
+    # Treat whatever we have as payload
+    ::gw::enqueue $sock [dict get $state buf]
+    unset clients($sock)
+}
+
+# ---------------------- Public control ----------------------
+proc ::gw::start {{port ""} args} {
+    variable srv_sock
+  
+
+    # Port selection and validation
+    if {$port ne ""} {
+        if {![string is integer -strict $port] || $port < 1 || $port > 65535} {
+            puts stderr "gw: invalid port '$port'; using 19898"
+            set ::gw::port 19898
+        } else {
+            set ::gw::port $port
+        }
+    }
+
+    # Spawn child with provided args (or default ::gw::cmd)
+    if {[llength $args] > 0} {
+        ::gw::spawn_child $args
+    } else {
+        ::gw::spawn_child
+    }
+
+    # Start server
+    if {$srv_sock ne ""} { return }
+    set srv_sock [socket -server ::gw::accept $::gw::port]
+    puts stderr "gw: listening on port $::gw::port"
+    vwait ::gw::forever
+}
+
+proc ::gw::stop {} {
+    variable srv_sock
+    if {$srv_sock ne ""} {
+        catch {close $srv_sock}
+        set srv_sock ""
+    }
+    ::gw::kill_child
+}
+
+# ---------------------- CLI ----------------------
+# Usage examples:
+#   tclsh gateway.tcl                         ;# default port/cmd
+#   tclsh gateway.tcl 19898 bash -i          ;# custom port & program
+#   tclsh gateway.tcl 20000 python -i
+
+if {[info exists argv0] && [file tail $argv0] eq [file tail [info script]]} {
+    if {[llength $argv] >= 1} {
+        set p [lindex $argv 0]
+        set rest [lrange $argv 1 end]
+        ::gw::start $p {*}$rest
+    } else {
+        ::gw::start
+    }
+}
