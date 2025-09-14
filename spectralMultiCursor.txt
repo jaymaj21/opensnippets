@@ -4,7 +4,136 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Spectral</title>
-    <style>
+    
+</head>
+<body>
+<div class="toolbars" id="top_toolbars">
+    <div class="toolbar">
+        <input type="file" id="fileLoader" title="Open file ...">
+
+        <button onclick="execBold()" id="boldButton" title="Boldface the selection">B</button>
+        <button onclick="execItalic()" id="italicsButton" title="Italicize the selection">I</button>
+        <button onclick="execUnderline()" id="underlineButton" title="Underline the selection">U</button>
+        <button onclick="removeBold()" id="removeBoldButton" title="Remove boldface from selection">¬B</button>
+        <button onclick="removeItalics()" id="removeItalicsButton" title="Remove italics from selection">¬I</button>
+        <button onclick="removeUnderline('editor')" id="removeUnderlineButton" title="Remove underline from selection">¬U</button>
+        
+        <button onclick="firstHalfBoldWords('editor')" title="Make left half of words bold faced"><strong>Bo</strong>ld</button>
+        <button onclick="secondHalfBoldWords('editor')" title="Make right half of words bold faced">Bo<strong>ld</strong></button>
+        <button onclick="target()" title="Set target">🎯</button>
+        <button onclick="link()" title="Create link to target">[🔗]</button>    
+        <button onclick="xlink()" title="Create external link">ext🔗</button> 
+        <button onclick="execCmd('removeFormat')" title="Clear highlighting/formatting from selection">Clear Formatting</button>
+        <input type="color" id="editorBgColor" title="Editor Background Color" value="#ffffff">
+        <button onclick="setDefaultFont()" title="Set default font and size">𝒟ℱ</button>
+        <button onclick="copyEditorToClipboard()" title="Copy editor content to clipboard">📋 Copy</button>
+        
+        <button onclick="showAWSConfigPopup()" title="Configure S3 details">S3 🔧🔑</button>
+        <button onclick="promptAndSaveToS3()" title="Save to S3 storage">💾 Save to S3</button>
+        <button onclick="promptAndLoadFromS3()" title="Load from S3 storage">📂 Load from S3</button>
+        <button title="Clean up MathML" onclick="tidyUp()">🧹 MathML</button> 
+
+        
+    </div>
+    <div class="toolbar">
+
+        <select id="fontChooser" title="Font for highlighters">
+            <option value="No Selection">No Font Selection</option>
+            <option value="Arial">Arial</option>
+            <option value="Verdana">Verdana</option>
+            <option value="Times New Roman">Times New Roman</option>
+            <option value="Courier New">Courier New</option>
+            <option value="OpenDyslexic">OpenDyslexic</option>
+            <option value="OpenDyslexicMono">OpenDyslexicMono</option>
+        </select>
+
+        <select id="sizeChooser" title="Font size for highlighters">
+            <option value="0" selected>No Size Selection</option>
+            <option value="1">Small</option>
+            <option value="3">Normal</option>
+            <option value="5">Large</option>
+            <option value="7">Huge</option>
+        </select>
+
+        <input type="color" id="colorChooser" title="Forground color for highlighters" value="#000000">
+        
+       <label>
+          <input type="checkbox" id="editableToggle" checked onchange="toggleEditable(this.checked)">
+          Editable
+        </label>
+        
+        <label>
+          <input type="checkbox" id="wrapToggle" checked onchange="toggleLineWrap(this.checked)">
+          Wrap lines
+        </label>
+        <label>
+          <input type="checkbox" id="caseInsensitive" checked>Ignore Case</label>
+    <button onclick="showFindReplaceDialog()" title="Find and replace">🔍 Find & Replace</button>
+    <button onclick="speakSelection()" title="Read aloud the selected text">🗣 Speak Selection</button>
+    <button id="toggleCursorModeBtn" onclick="toggleCursorInsertMode()" title="Add cursors to selection or interactively add cursors">🖱 Add n-Cursors</button>
+    <button onclick="clearAllCursors()" title="Clear all cursors">❌ Clear n-Cursors</button>
+    <button onclick="alignWithCursors()" id="alignWithCursorsBtn" style="font-size: 0.8em; padding: 2px 6px;">Align /w Cursors ⬅️</button>
+   <button onclick="sanitizeHtml()" title="Sanitize">🧼</button>
+        <button onclick="help()" title="Help screen">❓ Help</button>
+        
+    </div>
+
+    <div class="toolbar">
+        <input type="text" id="searchBox1" placeholder="Enter regex, press enter">
+        <button id="hlButton1" class="hlButton"> 🖍️</button>
+        <input type="text" id="searchBox2" placeholder="Enter regex, press enter">
+        <button id="hlButton2" class="hlButton"> 🖍️</button>
+        <input type="text" id="searchBox3" placeholder="Enter regex, press enter">
+        <button id="hlButton3" class="hlButton"> 🖍️</button>
+        <input type="text" id="searchBox4" placeholder="Enter regex, press enter">
+        <button id="hlButton4" class="hlButton"> 🖍️</button>
+        <input type="text" id="searchBox5" placeholder="Enter regex, press enter">
+        <button id="hlButton5" class="hlButton"> 🖍️</button>
+        <input type="text" id="searchBox6" placeholder="Enter regex, press enter">
+        <button id="hlButton6" class="hlButton"> 🖍️</button>
+        <input type="text" id="searchBox7" placeholder="Enter regex, press enter">
+        <button id="hlButton7" class="hlButton"> 🖍️</button>
+        
+        <label> <input type="checkbox" id="showSearchResults">Results</label>
+    </div>
+    <div class="toolbar" id="statusBar">
+      <textarea id="statusText" rows="2" readonly></textarea>
+    </div>
+</div>
+<br/>
+
+<script id="inline-script">
+function selectText(containerid) {
+    if (document.selection) { // IE
+        var range = document.body.createTextRange();
+        element = document.getElementById(containerid);
+        if(element != null)
+        {
+            range.moveToElementText(element);
+            range.select();
+            element.scrollIntoView();
+            setTimeout(function() {
+                    element.scrollIntoView({ behavior: "smooth" });
+                }, 1000);
+        }
+    } else if (window.getSelection) {
+        var range = document.createRange();
+        element = document.getElementById(containerid);
+        if (element != null)
+        {
+            range.selectNode(element);
+            window.getSelection().removeAllRanges();
+            window.getSelection().addRange(range);
+            element.scrollIntoView();
+            setTimeout(function() {
+                    element.scrollIntoView({ behavior: "smooth" });
+                }, 1000);
+            
+        }
+    }
+}
+</script>
+<style id="inline-style">
 @font-face {
   font-family: 'OpenDyslexic';
   src: url('https://jm21.s3.us-east-1.amazonaws.com/static_pages/opendyslexicmono-regular-webfont.woff2') format('woff2');
@@ -29,6 +158,19 @@
             vertical-align: text-bottom;
             height: 1em;
         }
+    pre { 
+    font-family: monospace;
+    font-size: 10pt; 
+    display: inline;
+    margin: 0;
+    //white-space: pre;
+    white-space: pre-wrap;       // CSS 3 
+    white-space: -moz-pre-wrap;  // Mozilla, since 1999 
+    white-space: -pre-wrap;      // Opera 4-6 
+    white-space: -o-pre-wrap;    // Opera 7 
+    
+    word-wrap: break-word;       // Internet Explorer 5.5+ 
+  }
         
         .searchResultsListing {
           max-height: 300px;       /* or any height you prefer */
@@ -200,108 +342,11 @@
   .toolbars {
     display: none; /* hide toolbar when printing */
   }
-
-
 }
+</style>
+<div id="editor" class="editor" contenteditable="true">
 
-    </style>
-</head>
-<body>
-<div class="toolbars" id="top_toolbars">
-    <div class="toolbar">
-        <input type="file" id="fileLoader" title="Open file ...">
-
-        <button onclick="execBold()" id="boldButton" title="Boldface the selection">B</button>
-        <button onclick="execItalic()" id="italicsButton" title="Italicize the selection">I</button>
-        <button onclick="execUnderline()" id="underlineButton" title="Underline the selection">U</button>
-        <button onclick="removeBold()" id="removeBoldButton" title="Remove boldface from selection">¬B</button>
-        <button onclick="removeItalics()" id="removeItalicsButton" title="Remove italics from selection">¬I</button>
-        <button onclick="removeUnderline('editor')" id="removeUnderlineButton" title="Remove underline from selection">¬U</button>
-        
-        <button onclick="firstHalfBoldWords('editor')" title="Make left half of words bold faced"><strong>Bo</strong>ld</button>
-        <button onclick="secondHalfBoldWords('editor')" title="Make right half of words bold faced">Bo<strong>ld</strong></button>
-        <button onclick="target()" title="Set target">🎯</button>
-        <button onclick="link()" title="Create link to target">[🔗]</button>    
-        <button onclick="xlink()" title="Create external link">ext🔗</button> 
-        <button onclick="execCmd('removeFormat')" title="Clear highlighting/formatting from selection">Clear Formatting</button>
-        <input type="color" id="editorBgColor" title="Editor Background Color" value="#ffffff">
-        <button onclick="setDefaultFont()" title="Set default font and size">𝒟ℱ</button>
-        <button onclick="copyEditorToClipboard()" title="Copy editor content to clipboard">📋 Copy</button>
-        
-        <button onclick="showAWSConfigPopup()" title="Configure S3 details">S3 🔧🔑</button>
-        <button onclick="promptAndSaveToS3()" title="Save to S3 storage">💾 Save to S3</button>
-        <button onclick="promptAndLoadFromS3()" title="Load from S3 storage">📂 Load from S3</button>
-        <button title="Clean up MathML" onclick="tidyUp()">🧹 MathML</button> 
-
-        
-    </div>
-    <div class="toolbar">
-
-        <select id="fontChooser" title="Font for highlighters">
-            <option value="No Selection">No Font Selection</option>
-            <option value="Arial">Arial</option>
-            <option value="Verdana">Verdana</option>
-            <option value="Times New Roman">Times New Roman</option>
-            <option value="Courier New">Courier New</option>
-            <option value="OpenDyslexic">OpenDyslexic</option>
-            <option value="OpenDyslexicMono">OpenDyslexicMono</option>
-        </select>
-
-        <select id="sizeChooser" title="Font size for highlighters">
-            <option value="0" selected>No Size Selection</option>
-            <option value="1">Small</option>
-            <option value="3">Normal</option>
-            <option value="5">Large</option>
-            <option value="7">Huge</option>
-        </select>
-
-        <input type="color" id="colorChooser" title="Forground color for highlighters" value="#000000">
-        
-       <label>
-          <input type="checkbox" id="editableToggle" checked onchange="toggleEditable(this.checked)">
-          Editable
-        </label>
-        
-        <label>
-          <input type="checkbox" id="wrapToggle" checked onchange="toggleLineWrap(this.checked)">
-          Wrap lines
-        </label>
-        <label>
-          <input type="checkbox" id="caseInsensitive" checked>Ignore Case</label>
-    <button onclick="showFindReplaceDialog()" title="Find and replace">🔍 Find & Replace</button>
-    <button onclick="speakSelection()" title="Read aloud the selected text">🗣 Speak Selection</button>
-    <button id="toggleCursorModeBtn" onclick="toggleCursorInsertMode()" title="Add cursors to selection or interactively add cursors">🖱 Add n-Cursors</button>
-    <button onclick="clearAllCursors()" title="Clear all cursors">❌ Clear n-Cursors</button>
-    <button onclick="alignWithCursors()" id="alignWithCursorsBtn" style="font-size: 0.8em; padding: 2px 6px;">Align /w Cursors ⬅️</button>
-   <button onclick="sanitizeHtml()" title="Sanitize">🧼</button>
-        <button onclick="help()" title="Help screen">❓ Help</button>
-        
-    </div>
-
-    <div class="toolbar">
-        <input type="text" id="searchBox1" placeholder="Enter regex, press enter">
-        <button id="hlButton1" class="hlButton"> 🖍️</button>
-        <input type="text" id="searchBox2" placeholder="Enter regex, press enter">
-        <button id="hlButton2" class="hlButton"> 🖍️</button>
-        <input type="text" id="searchBox3" placeholder="Enter regex, press enter">
-        <button id="hlButton3" class="hlButton"> 🖍️</button>
-        <input type="text" id="searchBox4" placeholder="Enter regex, press enter">
-        <button id="hlButton4" class="hlButton"> 🖍️</button>
-        <input type="text" id="searchBox5" placeholder="Enter regex, press enter">
-        <button id="hlButton5" class="hlButton"> 🖍️</button>
-        <input type="text" id="searchBox6" placeholder="Enter regex, press enter">
-        <button id="hlButton6" class="hlButton"> 🖍️</button>
-        <input type="text" id="searchBox7" placeholder="Enter regex, press enter">
-        <button id="hlButton7" class="hlButton"> 🖍️</button>
-        
-        <label> <input type="checkbox" id="showSearchResults">Results</label>
-    </div>
-    <div class="toolbar" id="statusBar">
-      <textarea id="statusText" rows="2" readonly></textarea>
-    </div>
 </div>
-<br/>
-<div id="editor" class="editor" contenteditable="true"></div>
 <script src="https://sdk.amazonaws.com/js/aws-sdk-2.1485.0.min.js"></script>
 <script>
         const isMac = /Mac/i.test(navigator.platform);
@@ -1884,7 +1929,7 @@ document.addEventListener('keydown', function(event) {
         } else if (event.key.toLowerCase() === 'p') {
             event.preventDefault();
             showImageScalingPopup();
-        } else if (event.key.toLowerCase() === 's') {
+        } else if (event.key === 'S') {
             event.preventDefault();
             save();
         } else if (event.key.toLowerCase() === 'z') {
@@ -1938,7 +1983,23 @@ document.addEventListener('keydown', function(event) {
             // Choose your desired filename programmatically
             const filename = generateFileName(); // Your custom function or static name
     
-            const blob = new Blob([editorContent], { type: 'text/html' });
+            /////////////////
+            // Pick only these two, by id, from the CLONE
+            const styleEl  = document.querySelector('#inline-style');
+            const scriptEl = document.querySelector('#inline-script');
+        
+            const parts = [];
+
+            // Order up to you; often style before script is sensible
+            if (styleEl)  { parts.push(styleEl.outerHTML);  }
+            if (scriptEl) { parts.push(scriptEl.outerHTML); }
+        
+
+ 
+            // Wrap however you like; here we place assets before the editor div
+            let combinedContent = `<html>\n${parts.join('\n')}\n${editorContent}\n</html>`;
+            /////////////////
+            const blob = new Blob([combinedContent], { type: 'text/html' });
             const downloadLink = document.createElement('a');
             
             downloadLink.href = URL.createObjectURL(blob);
@@ -2724,12 +2785,16 @@ function target(optionalId = null) {
 }
 
 function link(optionalId = null) {
-    if (!savedEditorRange) {
-        setStatus("No selection saved to create link.");
-        return;
-    }
 
-    const range = savedEditorRange.cloneRange();
+    const selection = window.getSelection();
+    if (selection.isCollapsed) {
+	    setStatus("No selection. Switching to image link mode");
+		addImageMapLink2();
+        return;
+	}
+
+    const range = selection.getRangeAt(0);
+
     const targetId = optionalId || lastTargetId;
 
     if (!targetId) {
@@ -2750,35 +2815,7 @@ function link(optionalId = null) {
 }
 
 
-function selectText(containerid) {
-    if (document.selection) { // IE
-        var range = document.body.createTextRange();
-        element = document.getElementById(containerid);
-        if(element != null)
-        {
-            range.moveToElementText(element);
-            range.select();
-            element.scrollIntoView();
-            setTimeout(function() {
-                    element.scrollIntoView({ behavior: "smooth" });
-                }, 1000);
-        }
-    } else if (window.getSelection) {
-        var range = document.createRange();
-        element = document.getElementById(containerid);
-        if (element != null)
-        {
-            range.selectNode(element);
-            window.getSelection().removeAllRanges();
-            window.getSelection().addRange(range);
-            element.scrollIntoView();
-            setTimeout(function() {
-                    element.scrollIntoView({ behavior: "smooth" });
-                }, 1000);
-            
-        }
-    }
-}
+
 var toolbarsVisible = true;
 function hideTools() {
     const toolbars = document.querySelectorAll('.toolbars');
@@ -5512,8 +5549,539 @@ function insertDownloadLinkAtSavedRange() {
     document.body.removeChild(fileInput);
 }
 
+//////////////////////////////////////////////////
 
+(() => {
+  // Escape plain text for LaTeX (outside math)
+  function escapeLatex(s) {
+    return s
+      .replace(/\\/g, '\\textbackslash{}')
+      .replace(/([#$%&_{}])/g, '\\$1')
+      .replace(/\^/g, '\\textasciicircum{}')
+      .replace(/~/g, '\\textasciitilde{}');
+  }
+
+  // Try to extract TeX from a <math> element (KaTeX/MathJax usually embed it here)
+  function extractTexFromMath(mathEl) {
+    // Any <annotation> whose encoding mentions "tex" (case-insensitive)
+    const ann = mathEl.querySelector('annotation[encoding*="tex" i]');
+    if (ann && ann.textContent.trim()) return ann.textContent.trim();
+
+    // Some renderers stash an alt text; not common, but try.
+    const alt = mathEl.getAttribute('alttext') || mathEl.getAttribute('aria-label');
+    if (alt && alt.trim()) return alt.trim();
+
+    return null; // no TeX available
+  }
+
+  // Decide inline vs display
+  function isDisplayMathFromContext(mathEl) {
+    if (mathEl.getAttribute('display') === 'block') return true;
+
+    const cont = mathEl.closest('mjx-container, .katex-display, .math-display, div.display, span.display');
+    if (cont) {
+      if (cont.tagName === 'MJX-CONTAINER') {
+        return (cont.getAttribute('display') || '').toLowerCase() === 'true';
+      }
+      if (cont.classList.contains('katex-display') || cont.classList.contains('math-display')) return true;
+    }
+    return false;
+  }
+
+  // Generic DOM -> LaTeX
+  function nodeToLatex(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return escapeLatex(node.nodeValue);
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+    const el = node;
+    const tag = el.tagName.toLowerCase();
+
+    // Math cases
+    if (tag === 'math') {
+      const tex = extractTexFromMath(el);
+      if (tex != null) {
+        return isDisplayMathFromContext(el) ? `\\[\n${tex}\n\\]` : `$${tex}$`;
+      }
+      // Fallback when TeX not embedded: keep a visible marker so you don’t lose it
+      return '[MATHML-without-TeX]';
+    }
+    if (tag === 'mjx-container') {
+      // MathJax v3: real <math> is inside <mjx-assistive-mml>
+      const m = el.querySelector('math');
+      if (m) return nodeToLatex(m);
+    }
+    if (tag === 'span' && el.classList.contains('katex')) {
+      // KaTeX: <span class="katex"><span class="katex-mathml"><math>...</math></span>...</span>
+      const m = el.querySelector('.katex-mathml math');
+      if (m) return nodeToLatex(m);
+    }
+
+    // Simple structure/formatting
+    if (tag === 'br') return '\n';
+
+    if (tag === 'p') return childrenToLatex(el).trimEnd() + '\n\n';
+    if (tag === 'div') {
+      // Treat as paragraph if it looks blocky; otherwise inline
+      const text = childrenToLatex(el);
+      const blockish = /^(p|div|ul|ol|pre|table|blockquote|h[1-6])$/.test(
+        Array.from(el.children)[0]?.tagName?.toLowerCase() || ''
+      );
+      return blockish ? text : text + '\n';
+    }
+
+    if (/^h[1-6]$/.test(tag)) {
+      const content = childrenToLatex(el).trim();
+      return `\\paragraph*{${content}}\\mbox{}\\par\n\n`;
+    }
+
+    if (tag === 'strong' || tag === 'b') return `\\textbf{${childrenToLatex(el)}}`;
+    if (tag === 'em' || tag === 'i') return `\\emph{${childrenToLatex(el)}}`;
+    if (tag === 'u') return `\\underline{${childrenToLatex(el)}}`;
+    if (tag === 'code' && el.closest('pre')) {
+      // handled by <pre>
+      return escapeLatex(el.textContent);
+    }
+    if (tag === 'code') {
+      return `\\texttt{${escapeLatex(el.textContent)}}`;
+    }
+    if (tag === 'pre') {
+      // safest for arbitrary code
+      return `\\begin{verbatim}\n${el.textContent.replace(/\s+$/,'')}\n\\end{verbatim}\n\n`;
+    }
+
+    if (tag === 'blockquote') {
+      return `\\begin{quote}\n${childrenToLatex(el).trim()}\n\\end{quote}\n\n`;
+    }
+
+    if (tag === 'ul' || tag === 'ol') {
+      const env = tag === 'ul' ? 'itemize' : 'enumerate';
+      let body = '';
+      el.querySelectorAll(':scope > li').forEach(li => {
+        body += '\\item ' + childrenToLatex(li).trim() + '\n';
+      });
+      return `\\begin{${env}}\n${body}\\end{${env}}\n\n`;
+    }
+    if (tag === 'li') return '\\item ' + childrenToLatex(el).trim() + '\n';
+
+    if (tag === 'a') {
+      const href = el.getAttribute('href') || '';
+      const text = childrenToLatex(el) || href;
+      // \href needs hyperref; if you’re not using it, switch to \url
+      return `\\href{${href}}{${text}}`;
+    }
+
+    // Tables (very simple): convert to a tabular with pipes
+    if (tag === 'table') {
+      const rows = Array.from(el.querySelectorAll(':scope > tbody > tr, :scope > tr'));
+      const colCount = Math.max(
+        1,
+        ...rows.map(r => r.querySelectorAll(':scope > th, :scope > td').length)
+      );
+      const cols = 'l'.repeat(colCount).split('').join(' | ');
+      let lines = `\\begin{tabular}{${cols}}\n\\hline\n`;
+      rows.forEach((r, idx) => {
+        const cells = Array.from(r.querySelectorAll(':scope > th, :scope > td'))
+          .map(c => childrenToLatex(c).trim().replace(/\n+/g,' '));
+        lines += cells.join(' & ') + ' \\\\ \\hline\n';
+      });
+      lines += '\\end{tabular}\n\n';
+      return lines;
+    }
+
+    // Default: just recurse
+    return childrenToLatex(el);
+  }
+
+  function childrenToLatex(el) {
+    let out = '';
+    el.childNodes.forEach(n => { out += nodeToLatex(n); });
+    return out;
+  }
+
+  // Public: turn #editor HTML into LaTeX (string)
+  window.exportEditorToLatex = function exportEditorToLatex() {
+    const root = document.getElementById('editor');
+    if (!root) throw new Error("No element with id='editor' found.");
+    const latex = childrenToLatex(root)
+      .replace(/[ \t]+\n/g, '\n')     // strip trailing spaces on lines
+      .replace(/\n{3,}/g, '\n\n')     // collapse excessive blank lines
+      .trim();
+    return latex;
+  };
+
+  // Public convenience: copy directly to system clipboard
+  window.tolatex = async function tolatex() {
+    const tex = exportEditorToLatex();
+    await navigator.clipboard.writeText(tex);
+    alert(`LaTeX copied to clipboard (${tex.length} chars).`);
+  };
+})();
+///////////////////////////////////////////////////
+
+/**
+ *
+ * One-shot image point picker.
+ * Usage:
+ *   startImagePointPicker((imgId, pt) => {
+ *     console.log('picked', imgId, pt.x, pt.y);
+ *   }, { container: '#editor' });
+ *
+ *  startImagePointPicker(function(a,b) {console.log(a); console.log(b);})
+ * Options:
+ *   - container: CSS selector that limits clicks to a region (default '#editor')
+ *   - crosshairCursor: CSS cursor value (default 'crosshair')
+ */
+function startImagePointPicker(f, opts = {}) {
+  const containerSel   = opts.container || '#editor';
+  const crosshair      = opts.crosshairCursor || 'crosshair';
+  const cursorMode     = opts.cursorMode || 'auto'; // <-- NEW: 'auto' (default) or 'external'
+
+
+  const container = document.querySelector(containerSel) || document.body;
+  const prevCursor = container.style.cursor;
+
+  let armed = true;
+    // Only set cursor if we're managing it
+  if (cursorMode !== 'external') {
+    container.style.cursor = crosshair;
+  }
+
+  // Make sure we only arm once even if called repeatedly
+  // and that contentEditable doesn't swallow clicks as selections.
+  const prevContentEditable = container.getAttribute('contenteditable');
+  if (prevContentEditable) {
+    // Keep it editable but reduce selection side-effects during pick
+    container.setAttribute('data-prev-contenteditable', prevContentEditable);
+  }
+
+  // Visual mode: crosshair
+  container.style.cursor = crosshair;
+
+  // Prevent default drag/selection while picking
+  const prevent = (e) => {
+    if (!armed) return;
+    // Only suppress inside the container
+    if (!container.contains(e.target)) return;
+    // Allow basic hover, suppress dragging/selection-y interactions
+    if (e.type === 'dragstart' || e.type === 'selectstart') e.preventDefault();
+  };
+
+  // Main click handler
+  const onClick = (e) => {
+    if (!armed) return;
+    if (!container.contains(e.target)) return;
+
+    // Find the nearest <img> the user clicked on (or inside)
+    const img = e.target.closest('img');
+    if (!img) {
+      // Click wasn’t on an image—ignore and stay armed
+      return;
+    }
+
+    // Compute click in intrinsic pixels (naturalWidth/Height)
+    const rect   = img.getBoundingClientRect();
+    const xCss   = e.clientX - rect.left;
+    const yCss   = e.clientY - rect.top;
+    const scaleX = img.naturalWidth  / img.clientWidth;
+    const scaleY = img.naturalHeight / img.clientHeight;
+    const x      = Math.round(xCss * scaleX);
+    const y      = Math.round(yCss * scaleY);
+
+    // Ensure image has an id; if not, assign a stable one
+    if (!img.id) {
+      img.id = 'img_' + Math.random().toString(36).slice(2, 9);
+    }
+
+    // Fire the callback
+    try {
+      f(img.id, { x, y });
+    } finally {
+      // Always tear down after one click
+      teardown();
+    }
+  };
+
+  // Allow user to cancel with ESC
+  const onKey = (e) => {
+    if (!armed) return;
+    if (e.key === 'Escape') {
+      teardown();
+    }
+  };
+
+  function teardown() {
+    if (!armed) return;
+    armed = false;
+    //container.style.cursor = prevCursor || '';
+    container.removeEventListener('click', onClick, true);
+    container.removeEventListener('dragstart', prevent, true);
+    container.removeEventListener('selectstart', prevent, true);
+    window.removeEventListener('keydown', onKey, true);
+  }
+
+  // Arm listeners (capture phase so we beat other handlers)
+  container.addEventListener('click', onClick, true);
+  container.addEventListener('dragstart', prevent, true);
+  container.addEventListener('selectstart', prevent, true);
+  window.addEventListener('keydown', onKey, true);
+
+  // Return a cancel function in case you want to exit without a click
+  return teardown;
+}
+
+// --- tiny helpers reused below ---------------------------------------------
+
+function _ensureImageMapFor(img, mapContainerEl) {
+  // Prefer the container passed in, else nearest editor ancestor, else body
+  const container = mapContainerEl || img.closest('#editor') || document.body;
+
+  let mapId = img.getAttribute('usemap');
+  if (!mapId) {
+    mapId = 'map_' + (img.id || ('img_' + Math.random().toString(36).slice(2,9)));
+    if (!img.id) img.id = mapId.replace(/^map_/, 'img_');
+    img.setAttribute('usemap', '#' + mapId);
+
+    const map = document.createElement('map');
+    map.name = mapId;     // used by usemap
+    map.id   = mapId;     // helpful for tools/selectors
+    container.appendChild(map);
+    return map;
+  } else {
+    mapId = mapId.replace(/^#/, '');
+    let mapEl = container.querySelector(`map[name="${mapId}"]`) 
+             || document.querySelector(`map[name="${mapId}"]`);
+    if (!mapEl) {
+      mapEl = document.createElement('map');
+      mapEl.name = mapId;
+      mapEl.id   = mapId;
+      container.appendChild(mapEl);
+    } else if (mapEl.parentElement !== container) {
+      // If an older map exists outside the editor, move it inside so it saves with editor
+      container.appendChild(mapEl);
+    }
+    return mapEl;
+  }
+}
+/**
+ * addRectHotspotUsingTwoPoints
+ * - First click picks corner A on an image
+ * - Second click (must be on the same image) picks corner B
+ * - Adds <area shape="rect"> with those corners into the image's map
+ *
+ * Options:
+ *   - container: CSS selector to limit picking scope (default '#editor')
+ *   - onStatus(msg): optional callback for UX messages
+ *   - onCancel(): optional callback if user presses Esc during either pick
+ *   - onDone({imageId, x1,y1,x2,y2, area}): optional callback after creation
+ *
+ * Returns: a cancel() function you can call to abort mid-flow.
+ */
+ function cleanupCursor() {
+    const container = document.getElementById('editor');
+    container.style.cursor = '';
+    document.body.style.cursor = '';
+  }
+function addRectHotspotUsingTwoPoints(opts = {}) {
+  const containerSel = opts.container || '#editor';
+  const onStatus = typeof opts.onStatus === 'function' ? opts.onStatus : () => {};
+  const onCancel = typeof opts.onCancel === 'function' ? opts.onCancel : () => {};
+  const onDone   = typeof opts.onDone   === 'function' ? opts.onDone   : () => {};
+
+  const container = document.querySelector(opts.container || '#editor') || document.body;
+  
+  let cancelFirst = null;
+  let cancelSecond = null;
+  let aborted = false;
+  
+  function cancel() {
+    aborted = true;
+    try { cancelFirst && cancelFirst(); } catch {}
+    try { cancelSecond && cancelSecond(); } catch {}
+    cleanupCursor();
+    onCancel();
+  }
+
+  onStatus('Pick first corner on the image (Esc to cancel)…');
+
+  // 1) First pick
+  cancelFirst = startImagePointPicker((imageIdA, ptA) => {
+    if (aborted) return;
+
+    onStatus('Pick opposite corner on the SAME image (Esc to cancel)…');
+
+    // 2) Second pick
+    const armSecond = () => {
+      cancelSecond = startImagePointPicker((imageIdB, ptB) => {
+        if (aborted) return;
+
+        if (imageIdB !== imageIdA) {
+          // Enforce same image; re-arm second pick
+          onStatus('That was a different image. Please pick the second corner on the SAME image…');
+          armSecond();
+          return;
+        }
+
+        // Build rect coords (intrinsic pixels)
+        const x1 = Math.min(ptA.x, ptB.x);
+        const y1 = Math.min(ptA.y, ptB.y);
+        const x2 = Math.max(ptA.x, ptB.x);
+        const y2 = Math.max(ptA.y, ptB.y);
+
+        const img = document.getElementById(imageIdA);
+        if (!img) { cleanupCursor(); return; }
+
+        const mapEl = _ensureImageMapFor(img, container);
+        const area = document.createElement('area');
+        area.shape = 'rect';
+        area.coords = [x1, y1, x2, y2].join(',');
+        
+		area.setAttribute("onclick", "selectText('"+ lastTargetId + "')");
+        mapEl.appendChild(area);
+
+        onStatus(`Added hotspot to ${imageIdA} at [${x1},${y1}]–[${x2},${y2}].`);
+        onDone({ imageId: imageIdA, x1, y1, x2, y2, area });
+	// All done — restore cursor
+        cleanupCursor();
+	
+      }, { container: containerSel });
+    };
+
+    armSecond();
+  }, { container: containerSel });
+
+  return cancel;
+}
+
+
+function addImageMapLink2 () {
+  const stop = addRectHotspotUsingTwoPoints({
+    container: '#editor',
+    onStatus: (msg) => setStatus(msg), // hook into your editor’s status bar if you like
+    onCancel: () => setStatus('Canceled.'),
+    onDone:   ({imageId, x1,y1,x2,y2}) => {
+      console.log('Hotspot created for', imageId, 'coords=', x1,y1,x2,y2);
+    }
+  });
+  
+
+  // If you ever need to abort from code:
+  // stop();
+}
+
+
+/**
+ * slideTemplate(n, opts)
+ * Generates a slide skeleton with anchors: prev / next / top,
+ * using random span IDs. Inserts into the editor and also returns
+ * the HTML string.
+ *
+ * Options:
+ *   - target: CSS selector for your editor root (default '#editor')
+ *   - replace: if true, replaces editor HTML; if false, appends (default true)
+ *   - titlePrefix: text prefix for slide titles (default 'Slide ')
+ *   - topLabel: label for the top marker (default 'TOP')
+ *
+ * Requires (or will create) a global selectText(id) function:
+ *   selectText(id) should select/highlight the element with that id.
+ */
+function slideTemplate(n, opts = {}) {
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error('slideTemplate: n must be a positive integer');
+  }
+
+  const targetSel   = opts.target || '#editor';
+  const replace     = opts.replace !== false; // default true
+  const titlePrefix = opts.titlePrefix || 'Slide ';
+  const topLabel    = opts.topLabel || 'TOP';
+
+  const root = document.querySelector(targetSel);
+  if (!root) throw new Error(`slideTemplate: cannot find ${targetSel}`);
+
+  // Minimal selectText if not provided
+  if (typeof window.selectText !== 'function') {
+    window.selectText = function (id) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const range = document.createRange();
+      range.selectNode(el);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    };
+  }
+
+  // Random ID generator with collision-avoidance
+  const seen = new Set();
+  function randId(len = 14) {
+    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let s = '';
+    for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    return s;
+  }
+  function uniqId() {
+    let id;
+    do { id = randId(); } while (seen.has(id) || document.getElementById(id));
+    seen.add(id);
+    return id;
+  }
+
+  // Build IDs: one for TOP + one per slide
+  const topId = uniqId();
+  const slideIds = Array.from({ length: n }, () => uniqId());
+
+  // Helper to create a spacer line like your sample
+  const spacer = () => '<pre><span></span> </pre>';
+
+  // Compose HTML
+  let html = '';
+
+  // TOP anchor
+  html += `</pre><span id=${topId}><pre>${escapeHtml(topLabel)}</pre></span>${spacer()}\n`;
+
+  // Slides
+  for (let i = 0; i < n; i++) {
+    const thisId = slideIds[i];
+    const prevId = i > 0 ? slideIds[i - 1] : null;
+    const nextId = i < n - 1 ? slideIds[i + 1] : null;
+
+    // Slide header
+    html += `\n</pre><span id=${thisId}><pre>${escapeHtml(titlePrefix + (i + 1))}</pre></span>${spacer()}`;
+
+    // Links row(s): prev (if any), next (if any), top (always)
+    if (prevId) {
+      html += ` <a href=#${prevId} onClick="javascript:selectText('${prevId}');">prev</a>${spacer()}`;
+    }
+    if (nextId) {
+      html += ` <a href=#${nextId} onClick="javascript:selectText('${nextId}');">next</a>${spacer()}`;
+    }
+    html += ` <a href=#${topId} onClick="javascript:selectText('${topId}');">top</a>${spacer()}\n`;
+  }
+
+  // Insert into editor
+  if (replace) {
+    root.innerHTML = html;
+  } else {
+    // Append in a block to avoid messing with current selection one node at a time
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    while (div.firstChild) root.appendChild(div.firstChild);
+  }
+
+  return html;
+
+  // --- helpers ---
+  function escapeHtml(s) {
+    return String(s)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;');
+  }
+}
 </script>
+
+
 <div id="textPopup" style="display:none; position:fixed; top:20%; left:50%; transform:translateX(-50%);
      background:white; padding:20px; border:1px solid #ccc; box-shadow: 0 4px 8px rgba(0,0,0,0.2); z-index:9999;">
   <h4 id="popupTextAreaHeading">Text Input:</h4>
@@ -5602,7 +6170,7 @@ function insertDownloadLinkAtSavedRange() {
   Ctrl+Alt+1     Add explanation around selection
   Ctrl+Alt+m     Match brackets (+ braces and parenthesis)
   Ctrl+Alt+p     Scale selected or nearby picture(s)
-  Ctrl+Alt-s     Save state
+  Ctrl+Alt+S     Save state
   Ctrl+Alt+z     Undo to the last saved state
   Ctrl+Alt+y     Redo undone state reversal 
   Ctrl+Alt+c     Clear temporary highlighting
@@ -5679,5 +6247,6 @@ Text Commands (Can be used with Javascript Eval):
 
 </body>
 </html>
+
 
 
