@@ -1,0 +1,83 @@
+import sys
+import re
+
+# Set this to True for debug output
+debug = False
+
+nargs = len(sys.argv)
+if nargs < 3:
+    print("Usage: instr.py filelist startlocid")
+    sys.exit()
+
+filelistfile = sys.argv[1]
+startlocid = int(sys.argv[2])
+
+with open(filelistfile, 'r') as filelistfp:
+    lines = filelistfp.readlines()
+
+count = 0
+
+def instrument_file(filename):
+    global startlocid
+    if filename.strip() == '':
+        return
+    print("Instrumenting file " + filename.strip())
+
+    startlocid += 1
+
+    with open(filename, 'r') as fp:
+        content = fp.read()
+
+    remaining = content
+    reassembled = ""
+
+    # Optional Java package line handler
+    match = re.search(r'^\s*package\s+[^;]+;', content)
+    if match:
+        firstpart = content[:match.end()]
+        remaining = content[match.end():]
+        reassembled += firstpart + "\nimport com.mprewriter.utils.*;\n"
+
+    # Try to locate a suitable point to inject
+    while True:
+        pattern = r"""(
+        \bdefault\s*: |
+        \bcase\b\s+[^:]+: |
+        (try|else|->|Exception)?\s*\)*\s*(//.*)?\s*\{
+        )"""
+        match = re.search(pattern, remaining, re.VERBOSE | re.DOTALL)
+        #match = re.search(r"(\bdefault\s*:)|(\bcase\b\s+[^:]+:)|(((try)|(->)|(Exception)|(else)|[)]|:)\s*(//.*)?\s*\{)", remaining)
+        if match is None:
+            break
+
+        firstpart = remaining[:match.end()]
+        remaining = remaining[match.end():]
+
+        leftmatch = re.search(r'((\bswitch\b)|(\binterface\b)|(new [A-Za-z_0-9]+[(][^)]*[)])|(\bclass\b)|(\benum\b))[^{;]*\{', firstpart)
+        rightmatch = re.search(r"""^(([0-9"\}])|(mprewriter)|(\s*super\()|(\s*this\())""", remaining[1:] if len(remaining) > 1 else "")
+
+        if debug:
+            print("STARTLOCID=" + str(startlocid))
+            print("firstpart=[[" + (firstpart or 'None') + "]]")
+            print("remaining=[[" + (remaining or 'None') + "]]")
+            print("leftmatch=[[" + str(leftmatch or 'None') + "]]")
+            print("rightmatch=[[" + str(rightmatch or 'None') + "]]")
+
+        reassembled += firstpart
+        if leftmatch is None and rightmatch is None:
+            reassembled += " mprewriter.scope_START(" + str(startlocid) + ");"
+            startlocid += 1
+
+    reassembled += remaining
+
+    with open(filename, 'w') as f:
+        f.write(reassembled)
+
+for line in lines:
+    stripped = line.strip()
+    if stripped:
+        count += 1
+        instrument_file(stripped)
+
+print("Total files instrumented:", count)
+

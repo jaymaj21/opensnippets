@@ -1,0 +1,55 @@
+import sys
+import re
+
+nargs = len(sys.argv)
+if (nargs <3):
+    print("Usage instr.py filelist startlocid")
+    sys.exit()
+
+filelistfile = sys.argv[1]
+startlocid = int(sys.argv[2])
+ 
+
+filelistfp = open(filelistfile,'r')
+lines = filelistfp.readlines()
+filelistfp.close()
+
+count = 0
+def instrument_file (filename):
+    global startlocid
+    if filename == '':
+        return
+    print("Instrumenting file " + filename)
+    startlocid = startlocid + 1
+    print("startlocid=" + str(startlocid))
+    fp = open(filename, 'r')
+    content = fp.read()
+    remaining = content
+    reassembled = ''
+    while True:
+        match = re.search("(\bdefault\s*:)|(\bcase\b\s+[^:]+:)|(((try)|(->)|(Exception)|(else)|[)]|:)\s*(//.*)?\s*\{)",remaining)
+        if match == None :
+            break
+        else:
+            firstpart = remaining[0:match.span()[1]]
+            leftmatch = re.search('((\bswitch\b)|(\binterface\b)|(new [A-Za-z_0-9]+[(][^)]*[)])|(\bclass\b)|(\benum\b))[^{;]*\{',firstpart)
+            remaining =  remaining[match.span()[1]:]
+            rightmatch = re.search("""^(([0-9"\}])|(mprewriter)|(\s*super\()|(\s*this\())""",remaining[1:])
+            reassembled = reassembled + firstpart
+            if (leftmatch == None and rightmatch == None):
+                reassembled = reassembled + "mprewriter.scope_START("+str(startlocid)+");"
+                startlocid = startlocid + 1
+    reassembled = reassembled + remaining
+    fp.close()
+    with open(filename, "w") as f:
+        f.write(reassembled)
+    
+
+for line in lines:
+    count += 1
+    instrument_file(line.strip())
+
+
+print("Total files instrumented:", count)
+ 
+
