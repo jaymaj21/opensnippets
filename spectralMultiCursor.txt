@@ -93,8 +93,9 @@
         <button id="hlButton6" class="hlButton"> 🖍️</button>
         <input type="text" id="searchBox7" placeholder="Enter regex, press enter">
         <button id="hlButton7" class="hlButton"> 🖍️</button>
-        
-        <label> <input type="checkbox" id="showSearchResults">Results</label>
+        <button onclick="showMultiRegexHighlightPopup()" title="Highlight multiple regexes (one per line)">🖍*</button>
+
+        <label> <input type="checkbox" id="showSearchResults" title="Show listing of search results">≣</label>
     </div>
     <div class="toolbar" id="statusBar">
       <textarea id="statusText" rows="2" readonly></textarea>
@@ -1879,7 +1880,52 @@ function  tabPressedNoSelection(indent, range) {
     
 };
 
+let writeToClipboardWhileSaving = false;
+function setWriteToClipboardWhileSaving(trueOrFalse)
+{
+    writeToClipboardWhileSaving = trueOrFalse;
+}
 
+function saveInnerHtmlLocally() {
+    const editorContent = document.getElementById('editor').outerHTML;
+
+    // Choose your desired filename programmatically
+    const filename = generateFileName(); // Your custom function or static name
+
+    /////////////////
+    // Pick only these two, by id, from the CLONE
+    const styleEl  = document.querySelector('#inline-style');
+    const scriptEl = document.querySelector('#inline-script');
+     const textPopupEl = document.querySelector('#textPopup');
+
+    const parts = [];
+
+    // Order up to you; often style before script is sensible
+    if (styleEl)  { parts.push(styleEl.outerHTML);  }
+    if (scriptEl) { parts.push(scriptEl.outerHTML); }
+    if (textPopupEl) { parts.push(textPopupEl.outerHTML); }
+
+
+
+    // Wrap however you like; here we place assets before the editor div
+    let combinedContent = `${parts.join('\n')}\n${editorContent}`;
+    /////////////////
+    const blob = new Blob(["<html>\n"+combinedContent+"\n</html>"], { type: 'text/html' });
+    const downloadLink = document.createElement('a');
+    
+    downloadLink.href = URL.createObjectURL(blob);
+    downloadLink.download = filename;  // This sets the default filename
+
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+
+    document.body.removeChild(downloadLink);
+    setStatus(`File '${filename}' saved.`);
+    if (writeToClipboardWhileSaving) {
+        navigator.clipboard.writeText(combinedContent);
+        alert(`Inner html content copied to text clipboard (${combinedContent.length} chars).`);
+    }
+}
 document.addEventListener('keydown', function(event) {
     
     if(event.ctrlKey && !event.altKey) {
@@ -1979,47 +2025,14 @@ document.addEventListener('keydown', function(event) {
             insertDownloadLinkAtSavedRange();
         } else if (event.key === 's') {
             event.preventDefault();
-            const editorContent = document.getElementById('editor').outerHTML;
-    
-            // Choose your desired filename programmatically
-            const filename = generateFileName(); // Your custom function or static name
-    
-            /////////////////
-            // Pick only these two, by id, from the CLONE
-            const styleEl  = document.querySelector('#inline-style');
-            const scriptEl = document.querySelector('#inline-script');
-             const textPopupEl = document.querySelector('#textPopup');
-        
-            const parts = [];
-
-            // Order up to you; often style before script is sensible
-            if (styleEl)  { parts.push(styleEl.outerHTML);  }
-            if (scriptEl) { parts.push(scriptEl.outerHTML); }
-            if (textPopupEl) { parts.push(textPopupEl.outerHTML); }
-        
-
- 
-            // Wrap however you like; here we place assets before the editor div
-            let combinedContent = `<html>\n${parts.join('\n')}\n${editorContent}\n</html>`;
-            /////////////////
-            const blob = new Blob([combinedContent], { type: 'text/html' });
-            const downloadLink = document.createElement('a');
-            
-            downloadLink.href = URL.createObjectURL(blob);
-            downloadLink.download = filename;  // This sets the default filename
-    
-            document.body.appendChild(downloadLink);
-            downloadLink.click();
-    
-            document.body.removeChild(downloadLink);
-            setStatus(`File '${filename}' saved.`);
+            saveInnerHtmlLocally();
         } else if (event.key === 'n') {
 		    event.preventDefault();
-            toggleLineNumbers();
-		} else if (event.key === 'f') {
+                    toggleLineNumbers();
+	} else if (event.key === 'f') {
 		    event.preventDefault();
                     setCurrentFileNameInteractive();
-		  }
+        }
 	
 		
     } else if (cursors.length == 0 && event.key === 'Enter' && event.target.id === 'editor') {
@@ -6060,6 +6073,7 @@ function slideTemplate(n, opts = {}) {
       html += ` <a href=#${nextId} onClick="javascript:selectText('${nextId}');">next</a>${spacer()}`;
     }
     html += ` <a href=#${topId} onClick="javascript:selectText('${topId}');">top</a>${spacer()}\n`;
+    html += "<br/><br/><br/>\n"
   }
 
   // Insert into editor
@@ -6082,7 +6096,207 @@ function slideTemplate(n, opts = {}) {
       .replaceAll('>', '&gt;');
   }
 }
+
+
+////////////////////////////////
+
+
+function incrint(userPattern, delta = 1) {
+  const editor = document.getElementById('editor');
+  if (!editor) return;
+
+  // Build a global regex from userPattern
+  let pat;
+  if (userPattern instanceof RegExp) {
+    const flags = userPattern.flags.includes('g') ? userPattern.flags : userPattern.flags + 'g';
+    pat = new RegExp(userPattern.source, flags);
+  } else {
+    pat = new RegExp(userPattern, 'g');
+  }
+
+  // Helper: increment every integer within a string (preserve zero padding)
+  function bumpIntsInsideString(s) {
+    return s.replace(/-?\d+/g, numStr => {
+      const neg = numStr[0] === '-';
+      const digits = neg ? numStr.slice(1) : numStr;
+      const hadPad = digits.length > 1 && digits[0] === '0';
+
+      const n = parseInt(numStr, 10) + delta;
+      const absStr = Math.abs(n).toString();
+
+      if (hadPad && n >= 0) {
+        return absStr.length >= digits.length ? absStr : absStr.padStart(digits.length, '0');
+      }
+      return (neg && n >= 0) ? absStr : (n < 0 ? '-' + absStr : absStr);
+    });
+  }
+
+  // Replace matches only in the given [start,end) slice of a text node
+  function replaceInSlice(node, start, end) {
+    const text = node.textContent;
+    const head = text.slice(0, start);
+    const mid  = text.slice(start, end).replace(pat, m => bumpIntsInsideString(m));
+    const tail = text.slice(end);
+    const next = head + mid + tail;
+    if (next !== text) node.textContent = next;
+  }
+
+  const sel = window.getSelection && window.getSelection();
+  
+  const useActiveSelection =
+    sel && sel.rangeCount > 0 && !sel.isCollapsed &&
+    [...Array(sel.rangeCount)].some(i => {
+      const r = sel.getRangeAt(i);
+      // selection is considered inside if either end is inside or the common ancestor is inside
+      return editor.contains(r.startContainer) || editor.contains(r.endContainer) ||
+             editor.contains(r.commonAncestorContainer);
+    });
+  var range =null;
+  if(useActiveSelection) {
+      range = sel.getRangeAt(0);
+  } else {
+      range = savedEditorRange;
+  }
+    
+
+  if (!range.isCollapsed) {
+    // Process only text nodes intersecting the (first) selection range inside #editor
+    
+    if (!(editor.contains(range.startContainer) || editor.contains(range.endContainer) ||
+          editor.contains(range.commonAncestorContainer))) {
+      // Selection is outside editor—do nothing
+      return;
+    }
+
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => range.intersectsNode(n) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
+    });
+
+    let node;
+    while ((node = walker.nextNode())) {
+      const len = node.textContent.length;
+
+      // Compute slice bounds for this node within the selection
+      const start = (range.startContainer === node) ? range.startOffset : 0;
+      const end   = (range.endContainer   === node) ? range.endOffset   : len;
+
+      if (start < end) replaceInSlice(node, start, end);
+      else if (range.startContainer !== node && range.endContainer !== node) {
+        // Entire node is inside the selection (typical middle nodes)
+        replaceInSlice(node, 0, len);
+      }
+    }
+  } else {
+    // No selection (or collapsed): process entire editor
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, null);
+    let node;
+    while ((node = walker.nextNode())) {
+      const text = node.textContent;
+      const replaced = text.replace(pat, m => bumpIntsInsideString(m));
+      if (replaced !== text) node.textContent = replaced;
+    }
+  }
+}
+
+
+// --- Multi-Regex Highlight via popup ---
+// Lines can be:
+//   - plain regex (e.g.  foo|\d+ )
+//   - numbered: "3: foo.*bar"  -> uses searchBox3 colour
+//   - JS-style: "/foo.*/im @5" -> regex body + flags, uses colour 5
+//   - comments/blank lines ignored (start with #)
+// Anything after 7 colours uses random colour mode (colid=0).
+
+function showMultiRegexHighlightPopup() {
+  const example = [
+    "# One regex per line; optional color index like '3:' or '@3'",
+    "TODO",
+    "3: \\bclass\\b\\s+\\w+",
+    "/function\\s+\\w+/i @5",
+    "",
+  ].join("\n");
+
+  showTextPopup(function(text) {
+    runMultiRegexHighlight(text);
+  }, "Multi-Regex Highlight (one per line)", example);
+}
+
+function runMultiRegexHighlight(raw) {
+  if (!raw) { setStatus("No patterns supplied."); return; }
+
+  const lines = raw.split(/\r?\n/);
+  let assigned = 1; // next auto color id 1..7
+  const showResults = document.getElementById("showSearchResults")?.checked;
+
+  // helper: clamp auto id to 1..7, else fall back to random (0)
+  function nextColId() {
+    if (assigned <= 7) return assigned++;
+    return 0; // random colour via highlightRegexRobust
+  }
+
+  // Parse a single input line into {pattern, flags, colid}
+  function parseLine(line) {
+    let s = line.trim();
+    if (!s || s.startsWith("#")) return null;
+
+    // explicit `N:` prefix (choose colour N)
+    let explicitCol = null;
+    const prefixMatch = s.match(/^([1-7])\s*:\s*(.*)$/);
+    if (prefixMatch) {
+      explicitCol = parseInt(prefixMatch[1], 10);
+      s = prefixMatch[2].trim();
+    }
+
+    // JS-like /pattern/flags with optional " @N"
+    let colFromTail = null;
+    const tailMatch = s.match(/\s@([1-7])\s*$/);
+    if (tailMatch) {
+      colFromTail = parseInt(tailMatch[1], 10);
+      s = s.replace(/\s@([1-7])\s*$/, "").trim();
+    }
+
+    let pattern = s;
+    let flags = ""; // we rely on your case-insensitive checkbox too
+
+    const jsStyle = s.match(/^\/(.+)\/([gimuyds]*)$/);
+    if (jsStyle) {
+      pattern = jsStyle[1];
+      flags = jsStyle[2] || "";
+    }
+
+    const colid = explicitCol ?? colFromTail ?? nextColId();
+    return { pattern, flags, colid };
+  }
+
+  // run all
+  const tasks = [];
+  for (const line of lines) {
+    const parsed = parseLine(line);
+    if (!parsed) continue;
+
+    // Populate corresponding search box (1..7) if applicable
+    if (parsed.colid >= 1 && parsed.colid <= 7) {
+      const sb = document.getElementById("searchBox" + parsed.colid);
+      if (sb) sb.value = parsed.pattern;
+    }
+
+    // Respect your global case-insensitive checkbox; your highlighter
+    // already merges flags (g, m are set internally). We only pass pattern+colid.
+    // If you want to merge custom flags, you can extend highlightRegexRobust
+    // to accept explicit flags; for now we keep behaviour consistent.
+    tasks.push(() => highlightRegexRobust(parsed.pattern, parsed.colid, !!showResults));
+  }
+
+  // Execute in order (helps keep colours/results panels tidy)
+  let total = 0;
+  for (const t of tasks) {
+    t();
+    total++;
+  }
+  setStatus(`Multi-Regex: highlighted ${total} pattern(s).`);
+}
 </script>
+
 
 
 <div id="textPopup" style="display:none; position:fixed; top:20%; left:50%; transform:translateX(-50%);
@@ -6250,6 +6464,7 @@ Text Commands (Can be used with Javascript Eval):
 
 </body>
 </html>
+
 
 
 
