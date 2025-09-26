@@ -105,6 +105,30 @@
 
 <script id="inline-script">
 
+// Opens a simple viewer window containing the original <img> HTML
+function showImageFromButton(btn) {
+  try {
+    const html = Base64.decode(btn.getAttribute('data-imghtml'));
+    const w = window.open('', '_imgview', 'resizable=yes,width=900,height=700');
+    if (!w) return alert('Popup blocked. Please allow popups for this action.');
+    const doc = w.document;
+    doc.open();
+    doc.write(
+      '<!doctype html><html><head><meta charset="utf-8">' +
+      '<title>Image Viewer</title>' +
+      '<style>body{margin:0;padding:0;display:flex;flex-direction:column;height:100vh}' +
+      'header{padding:6px 10px;border-bottom:1px solid #ddd;font-family:sans-serif}' +
+      'main{flex:1;display:flex;align-items:center;justify-content:center;background:#f8f8f8;overflow:auto}' +
+      'img{max-width:100%;max-height:100%;height:auto}</style></head><body>' +
+      '<header><button onclick="window.close()">Close</button></header>' +
+      '<main>' + html + '</main></body></html>'
+    );
+    doc.close();
+  } catch (e) {
+    alert('Could not open image: ' + e);
+  }
+}
+
 function submitTextPopup() {
     const text = document.getElementById('popupTextarea').value;
     closeTextPopup();
@@ -1973,9 +1997,12 @@ document.addEventListener('keydown', function(event) {
         if (event.key.toLowerCase() === 'm') {
           event.preventDefault();
           matchAndHighlightBrackets(); 
-        } else if (event.key.toLowerCase() === 'p') {
+        } else if (event.key === 'p') {
             event.preventDefault();
             showImageScalingPopup();
+        } else if (event.key === 'P') {
+            event.preventDefault();
+            replaceImagesInSelectionWithButtons();
         } else if (event.key === 'S') {
             event.preventDefault();
             save();
@@ -6174,7 +6201,7 @@ function incrint(userPattern, delta = 1) {
 
       // Compute slice bounds for this node within the selection
       const start = (range.startContainer === node) ? range.startOffset : 0;
-      const end   = (range.endContainer   === node) ? range.endOffset   : len;
+      const end = (range.endContainer   === node) ? range.endOffset   : len;
 
       if (start < end) replaceInSlice(node, start, end);
       else if (range.startContainer !== node && range.endContainer !== node) {
@@ -6309,6 +6336,87 @@ function runMultiRegexHighlight(raw) {
   }
   setStatus(`Multi-Regex: highlighted ${total} pattern(s).`);
 }
+
+// --- Image → Button replacer that survives save/load ---
+
+
+// Turn an <img> into a persistent button with embedded original HTML
+function makeImageButtonFromImg(imgEl) {
+  // Preserve the exact element (attributes, inline styles, etc.)
+  const originalImgHtml = imgEl.outerHTML;
+  const encoded = Base64.encode(originalImgHtml); // uses your existing Base64 helper  :contentReference[oaicite:1]{index=1}
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'image-button-reveal';
+  btn.title = 'Show original image';
+  // Minimal, printer-friendly styling (can be overridden by your CSS)
+  btn.style.cssText = 'display:inline-block;padding:2px 6px;margin:0 2px;' +
+                      'border:1px solid #888;border-radius:4px;background:#eee;cursor:pointer;font:12px/1 Arial, sans-serif;';
+  // A small pictogram + optional size hint
+  const w = imgEl.getAttribute('width') || imgEl.naturalWidth || '';
+  const h = imgEl.getAttribute('height') || imgEl.naturalHeight || '';
+  btn.textContent = w && h ? `🖼️ ${w}×${h}` : '🖼️ image';
+
+  // Store the original element as Base64-encoded HTML so it survives innerHTML save/load
+  btn.setAttribute('data-imghtml', encoded);
+
+  // Inline handler ensures persistence after saveInnerHtmlLocally and reload of #editor.innerHTML
+  btn.setAttribute('onclick', 'showImageFromButton(this)');
+
+  return btn;
+}
+
+// Main entry: replace all images intersecting the saved selection inside #editor
+function replaceImagesInSelectionWithButtons() {
+  const editor = document.getElementById('editor');
+  const range = (typeof savedEditorRange !== 'undefined') ? savedEditorRange : null; // uses your global  :contentReference[oaicite:2]{index=2}
+  if (!editor || !range || !editor.contains(range.commonAncestorContainer)) {
+    setStatus && setStatus('No valid selection in editor.');
+    return;
+  }
+  if (range.collapsed) {
+    setStatus && setStatus('Selection is collapsed – nothing to replace.');
+    return;
+  }
+
+  // Collect <img> nodes that intersect the selection
+  const imgs = Array.from(editor.querySelectorAll('img')).filter(img => {
+    try { return range.intersectsNode(img); } catch { return false; }
+  });
+
+  if (imgs.length === 0) {
+    setStatus && setStatus('No images found in selection.');
+    return;
+  }
+
+  // Replace from last to first to avoid messing with DOM indices
+  let replaced = 0;
+  for (let i = imgs.length - 1; i >= 0; i--) {
+    const img = imgs[i];
+    const btn = makeImageButtonFromImg(img);
+    img.replaceWith(btn);
+    replaced++;
+  }
+
+  setStatus && setStatus(`Replaced ${replaced} image(s) with buttons.`);
+}
+
+// Optional: tiny CSS helper (safe if duplicated)
+(function ensureImageButtonStyle(){
+  const id = 'image-button-reveal-style';
+  if (!document.getElementById(id)) {
+    const s = document.createElement('style');
+    s.id = id;
+    s.textContent = `
+      .image-button-reveal:focus { outline: 2px solid #66aaff; }
+      @media print {
+        .image-button-reveal { background:#fff; border:1px solid #000; }
+      }
+    `;
+    document.head.appendChild(s);
+  }
+})();
 </script>
 
 
