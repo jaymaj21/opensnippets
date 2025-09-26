@@ -5157,11 +5157,6 @@ function insertGeneratedTextAtCursors(generatorFn) {
     setStatus(`Inserted generated text at ${cursors.length} cursor(s).`);
 }
 
-function enumerateCursors(countStart = 1) 
-{
-    let counter = countStart;
-    insertGeneratedTextAtCursors(() => `#${counter++} `);
-}
 
 // Collect all lines and return which ones have a highlight span
 function getLinesWithHighlights() {
@@ -5473,8 +5468,9 @@ function promptForFields(fieldNames, callback) {
 
 function enumerateCursors(countStart = 1) 
 {
-    let counter = countStart;
-    insertGeneratedTextAtCursors(() => `#${counter++} `);
+    const editor = document.getElementById('editor');
+    let counter = editor.querySelectorAll('.cursor').length + countStart -1;
+    insertGeneratedTextAtCursors(() => `#${counter--} `);
 }
 
 // Collect all lines and return which ones have a highlight span
@@ -6207,18 +6203,36 @@ function incrint(userPattern, delta = 1) {
 //   - comments/blank lines ignored (start with #)
 // Anything after 7 colours uses random colour mode (colid=0).
 
+
+// use localStorage (persists across reloads). swap to sessionStorage if you prefer per-tab memory.
+const MRH_LS_KEY = 'multiRegexHighlight.last';
+
+// helpers
+function loadLastMultiRegexText() {
+  try { return localStorage.getItem(MRH_LS_KEY) || ""; } catch { return ""; }
+}
+function saveLastMultiRegexText(text) {
+  try { localStorage.setItem(MRH_LS_KEY, text || ""); } catch {}
+}
+
+// your existing popup opener — updated to prefill with last text
 function showMultiRegexHighlightPopup() {
   const example = [
     "# One regex per line; optional color index like '3:' or '@3'",
     "TODO",
     "3: \\bclass\\b\\s+\\w+",
     "/function\\s+\\w+/i @5",
-    "",
+    ""
   ].join("\n");
 
+  const prefill = loadLastMultiRegexText() || example;
+
+  // showTextPopup(cb, title, defaultText) — reuse your existing popup
   showTextPopup(function(text) {
-    runMultiRegexHighlight(text);
-  }, "Multi-Regex Highlight (one per line)", example);
+    if (!text) { setStatus("No patterns supplied."); return; }
+    saveLastMultiRegexText(text);         // <-- remember for next time
+    runMultiRegexHighlight(text);         // your existing highlighter
+  }, "Multi-Regex Highlight (one per line)", prefill);
 }
 
 function runMultiRegexHighlight(raw) {
