@@ -3,18 +3,24 @@
 <head>
   <meta charset="utf-8" />
   <title>Editable Div</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     html, body { height: 100%; margin: 0; }
     #editor {
       box-sizing: border-box;
       width: 100%;
       height: 100%;
-	  background: "#abbaab"
+      padding: 16px;
+      outline: none;
+      overflow: auto;
+      font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
   </style>
 </head>
 <body>
-  <div id="editor" contenteditable="true" width="100%" height="100%">
+  <div id="editor" contenteditable="true">
   </div>
 </body>
 </html>
