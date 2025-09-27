@@ -2003,6 +2003,10 @@ document.addEventListener('keydown', function(event) {
         } else if (event.key === 'P') {
             event.preventDefault();
             replaceImagesInSelectionWithButtons();
+        } else if (event.key === '/') {
+             event.preventDefault();
+             showMultiRegexHighlightPopup();
+             return;
         } else if (event.key === 'S') {
             event.preventDefault();
             save();
@@ -6417,8 +6421,219 @@ function replaceImagesInSelectionWithButtons() {
     document.head.appendChild(s);
   }
 })();
-</script>
 
+
+
+// Remove all mprewriter.scope_START(<number>); probes from #editor
+// while PRESERVING a trailing newline if present.
+function instrclean() {
+  const editor = document.getElementById('editor');
+  if (!editor) return alert('#editor not found.');
+
+  // Strict token regex (no tags): capture optional spaces + one optional newline AFTER the semicolon.
+  // We reinsert what we captured (spaces + the newline) so the line break stays intact.
+  const textPattern = /\bmprewriter\s*\.\s*scope_START\s*\(\s*\d+\s*\)\s*;([ \t]*)(\r?\n)?/g;
+
+  let removed = 0;
+
+  // --- Pass 1: text nodes (fast & safe, preserves newline) ---
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, null);
+  const textNodes = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) textNodes.push(n);
+
+  textNodes.forEach(node => {
+    const before = node.nodeValue;
+    if (!before) return;
+
+    let local = 0;
+    const after = before.replace(textPattern, (_m, sp, nl) => {
+      local++;
+      // Put back any spaces and the newline if it existed
+      return (sp || '') + (nl || '');
+    });
+
+    if (local > 0) {
+      node.nodeValue = after;
+      removed += local;
+    }
+  });
+
+  // --- Pass 2: HTML fallback (handles cases where tokens are split by tags) ---
+  // Allow tags/whitespace between tokens; after the semicolon, capture up to one newline (if present) to reinsert.
+  const sep = '(?:\\s|<[^>]*>)*';
+  const htmlPattern = new RegExp(
+    '\\bmprewriter' + sep + '\\.' + sep + 'scope_START' + sep + '\\(' + sep + '\\d+' + sep + '\\)' + sep + ';' + sep,
+    'gi'
+  );
+
+  let html = editor.innerHTML;
+  let changed = false;
+  html = html.replace(htmlPattern, (fullMatch) => {
+    // Count removal
+    removed++;
+    changed = true;
+    // If the captured span (including tags/spaces) contains a literal newline,
+    // keep exactly ONE newline. Otherwise keep nothing.
+    const nl = fullMatch.match(/\r?\n/);
+    return nl ? nl[0] : '';
+  });
+  if (changed) editor.innerHTML = html;
+
+  // Optional tidy: collapse 3+ blank lines to at most 2 (doesn't remove single newlines)
+  tidyBlankLines(editor);
+
+  if (typeof setStatus === 'function') {
+    setStatus(`Removed ${removed} probe call(s).`);
+  } else {
+    console.log(`instrclean: removed ${removed} probe call(s).`);
+  }
+}
+
+// Collapse excessive blank lines inside #editor (safe no-op for most content)
+function tidyBlankLines(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  const nodes = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+  nodes.forEach(node => {
+    if (!node.nodeValue) return;
+    const s = node.nodeValue;
+    const t = s.replace(/(\r?\n[ \t]*){3,}/g, '\n\n');
+    if (t !== s) node.nodeValue = t;
+  });
+}
+
+
+function instrjava(startId = 1000) {
+  const ed = document.getElementById('editor');
+  if (!ed) { console.warn('instrjava: #editor not found'); return { inserted: 0, lastId: startId }; }
+
+  // Get plain Java source (normalize line endings)
+  let src = ed.innerText.replace(/\r\n?/g, '\n');
+
+  // Insert import after leading package (if any), once
+  if (!/^\s*import\s+com\.mprewriter\.utils\.\*\s*;/m.test(src)) {
+    const pkgMatch = src.match(/^\s*package\s+[^;]+;\s*/m);
+    if (pkgMatch && pkgMatch.index === 0) {
+      src = src.slice(0, pkgMatch[0].length) + "import com.mprewriter.utils.*;\n" + src.slice(pkgMatch[0].length);
+    }
+  }
+
+  let i = 0, n = src.length;
+  let out = '';
+  let loc = startId;
+  let inserted = 0;
+
+  // simple states
+  let inSL = false, inML = false, inSQ = false, inDQ = false, inChar = false, esc = false;
+
+  // helpers
+  function isWS(ch) { return /\s/.test(ch); }
+  function rightUnsafeLookahead(idx) {
+    // look at next non-space chunk
+    let j = idx;
+    while (j < n && /\s/.test(src[j])) j++;
+    // unsafe: starts with digit, quote, }, "mprewriter", "super(", "this("
+    if (j < n && /[0-9"}']/.test(src[j])) return true;
+    if (src.slice(j, j+10) === 'mprewriter') return true;
+    if (/^super\s*\(/.test(src.slice(j))) return true;
+    if (/^this\s*\(/.test(src.slice(j))) return true;
+    return false;
+  }
+  function lastBoundaryBefore(idx) {
+    // last of start, ';', '{', '}', or a newline that likely delimits a label
+    let k = idx - 1, best = 0;
+    for (; k >= 0; k--) {
+      const c = src[k];
+      if (c === ';' || c === '{' || c === '}' || c === '\n') { best = k + 1; break; }
+    }
+    return best;
+  }
+  function isSkippableBlockOpener(segment) {
+    // if the segment (from last boundary to '{') contains class|enum|interface|switch before the brace
+    // ignore parens content roughly
+    const s = segment.replace(/\/\/.*|\/\*[\s\S]*?\*\//g, ' '); // strip comments
+    return /\b(class|enum|interface|switch)\b[\s\S]*\{$/.test(s);
+  }
+  function isCaseOrDefaultLabel(lineStartIdx, colonIdx) {
+    const seg = src.slice(lineStartIdx, colonIdx);
+    // remove comments
+    const s = seg.replace(/\/\/.*$/m, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    return /\bcase\b[\s\S]*$/.test(s) || /\bdefault\b\s*$/.test(s);
+  }
+
+  while (i < n) {
+    const ch = src[i], next = src[i+1];
+
+    // handle comment/string states
+    if (inSL) {
+      out += ch;
+      if (ch === '\n') inSL = false;
+      i++; continue;
+    }
+    if (inML) {
+      out += ch;
+      if (ch === '*' && next === '/') { out += next; i += 2; inML = false; continue; }
+      i++; continue;
+    }
+    if (inSQ) {
+      out += ch;
+      if (!esc && ch === "'") inSQ = false;
+      esc = ch === '\\' && !esc;
+      i++; continue;
+    }
+    if (inDQ) {
+      out += ch;
+      if (!esc && ch === '"') inDQ = false;
+      esc = ch === '\\' && !esc;
+      i++; continue;
+    }
+
+    // enter states
+    if (ch === '/' && next === '/') { out += ch + next; i += 2; inSL = true; continue; }
+    if (ch === '/' && next === '*') { out += ch + next; i += 2; inML = true; continue; }
+    if (ch === "'") { out += ch; inSQ = true; esc = false; i++; continue; }
+    if (ch === '"') { out += ch; inDQ = true; esc = false; i++; continue; }
+
+    // CASE/DEFAULT labels: instrument after colon
+    if (ch === ':') {
+      const lineStart = lastBoundaryBefore(i);
+      if (isCaseOrDefaultLabel(lineStart, i) && !rightUnsafeLookahead(i + 1)) {
+        out += ch + 'mprewriter.scope_START(' + (loc++) + ');';
+        inserted++;
+        i++; continue;
+      }
+    }
+
+    // Block openers: instrument after '{' if not class/enum/interface/switch
+    if (ch === '{') {
+      const start = lastBoundaryBefore(i);
+      const segment = src.slice(start, i + 1); // include '{'
+      if (!isSkippableBlockOpener(segment) && !rightUnsafeLookahead(i + 1)) {
+        out += ch + 'mprewriter.scope_START(' + (loc++) + ');';
+        inserted++;
+        i++; continue;
+      }
+    }
+
+    // default copy
+    out += ch;
+    i++;
+  }
+
+  // write back
+  ed.innerText = out;
+
+  if (typeof setStatus === 'function') {
+    setStatus(`Instrumented ${inserted} probe(s). Last id: ${loc - 1}`);
+  } else {
+    console.log(`instrjava: inserted=${inserted}, lastId=${loc - 1}`);
+  }
+  return { inserted, lastId: loc - 1 };
+}
+
+
+
+</script>
 
 
 <div id="textPopup" style="display:none; position:fixed; top:20%; left:50%; transform:translateX(-50%);
@@ -6509,6 +6724,8 @@ function replaceImagesInSelectionWithButtons() {
   Ctrl+Alt+1     Add explanation around selection
   Ctrl+Alt+m     Match brackets (+ braces and parenthesis)
   Ctrl+Alt+p     Scale selected or nearby picture(s)
+  Ctrl+Alt+P     Iconize selected picture(s)
+  Ctrl+Alt+/     Iconize selected picture(s)
   Ctrl+Alt+S     Save state
   Ctrl+Alt+z     Undo to the last saved state
   Ctrl+Alt+y     Redo undone state reversal 
@@ -6583,7 +6800,8 @@ Text Commands (Can be used with Javascript Eval):
     padding:10px; font-size:14px; z-index:9999;">
     ⏹️ Stop Speaking
 </button>
-
+<!-- hide tools -->
+<script>hideTools()</script>
 </body>
 </html>
 
