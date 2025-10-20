@@ -2530,6 +2530,9 @@ function applyImageScaling(scale) {
             range.deleteContents();
             range.insertNode(updatedFragment);
 
+            // Resync maps for any images we just scaled
+            (document.getElementById('editor').querySelectorAll('img[usemap]') || []).forEach(syncImageMapFor);
+
             savedEditorRange = null;
             window.getSelection().removeAllRanges();
             setStatus(`Scaled ${imagesToScale.length} image(s) to ${scale}%.`);
@@ -2558,6 +2561,7 @@ function applyImageScaling(scale) {
         if (nearestImage) {
             nearestImage.width = nearestImage.width * (scale / 100);
             nearestImage.removeAttribute('height');
+            syncImageMapFor(nearestImage);
             setStatus(`Scaled nearest image to ${scale}%.`);
         } else {
             alert("No image found near the cursor.");
@@ -5926,6 +5930,47 @@ function _ensureImageMapFor(img, mapContainerEl) {
     container.style.cursor = '';
     document.body.style.cursor = '';
   }
+ function syncImageMapFor(img) {
+  if (!img) return;
+  const mapId = (img.getAttribute('usemap') || '').replace(/^#/, '');
+  if (!mapId) return;
+  const map = (img.closest('#editor') || document).querySelector(`map[name="${mapId}"]`);
+  if (!map) return;
+
+  const w = img.clientWidth || img.width || img.naturalWidth;
+  const h = img.clientHeight || img.height || img.naturalHeight;
+
+  map.querySelectorAll('area').forEach(area => {
+    // Prefer normalised data; if missing, derive once from current coords
+    let norm = area.dataset.norm;
+    if (!norm) {
+      const nums = (area.coords || '0,0,0,0').split(',').map(n => parseFloat(n) || 0);
+      // Fallback assumes coords were authored at current display size
+      const nx1 = nums[0] / w, ny1 = nums[1] / h, nx2 = nums[2] / w, ny2 = nums[3] / h;
+      norm = [nx1, ny1, nx2, ny2].join(',');
+      area.dataset.norm = norm;
+    }
+    const [nx1, ny1, nx2, ny2] = norm.split(',').map(Number);
+    const x1 = Math.round(nx1 * w), y1 = Math.round(ny1 * h);
+    const x2 = Math.round(nx2 * w), y2 = Math.round(ny2 * h);
+    area.coords = [x1, y1, x2, y2].join(',');
+  });
+}
+
+// Utility: resync all mapped images (on resize)
+function syncAllImageMapsInEditor() {
+  const editor = document.getElementById('editor');
+  if (!editor) return;
+  editor.querySelectorAll('img[usemap]').forEach(syncImageMapFor);
+}
+
+// Keep maps responsive if the window/layout changes
+window.addEventListener('resize', () => {
+  syncAllImageMapsInEditor();
+});
+ 
+
+
 function addRectHotspotUsingTwoPoints(opts = {}) {
   const containerSel = opts.container || '#editor';
   const onStatus = typeof opts.onStatus === 'function' ? opts.onStatus : () => {};
@@ -5976,10 +6021,23 @@ function addRectHotspotUsingTwoPoints(opts = {}) {
         if (!img) { cleanupCursor(); return; }
 
         const mapEl = _ensureImageMapFor(img, container);
-        const area = document.createElement('area');
-        area.shape = 'rect';
-        area.coords = [x1, y1, x2, y2].join(',');
-        
+
+
+       
+         const area = document.createElement('area');
+         area.shape = 'rect';
+         area.coords = [x1, y1, x2, y2].join(',');
+         // Save normalised (0..1) coords against the image's natural size.
+         const nx1 = x1 / img.naturalWidth,  ny1 = y1 / img.naturalHeight;
+         const nx2 = x2 / img.naturalWidth,  ny2 = y2 / img.naturalHeight;
+         area.dataset.norm = [nx1, ny1, nx2, ny2].join(',');
+         
+ 		 area.setAttribute("onclick", "selectText('"+ lastTargetId + "')");
+         mapEl.appendChild(area);
+         // Materialise coords for current display size (and any time it changes)
+         syncImageMapFor(img);
+
+
 		area.setAttribute("onclick", "selectText('"+ lastTargetId + "')");
         mapEl.appendChild(area);
 
@@ -6725,7 +6783,7 @@ function instrjava(startId = 1000) {
   Ctrl+Alt+m     Match brackets (+ braces and parenthesis)
   Ctrl+Alt+p     Scale selected or nearby picture(s)
   Ctrl+Alt+P     Iconize selected picture(s)
-  Ctrl+Alt+/     Iconize selected picture(s)
+  Ctrl+Alt+/     Search for multiple regexes (one per line)
   Ctrl+Alt+S     Save state
   Ctrl+Alt+z     Undo to the last saved state
   Ctrl+Alt+y     Redo undone state reversal 
