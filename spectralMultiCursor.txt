@@ -6690,6 +6690,358 @@ function instrjava(startId = 1000) {
 }
 
 
+/* -------- Markdown → HTML renderer (mdrender) -------- */
+
+function mdrender() {
+  const root = document.getElementById('editor');
+  if (!root) return alert('#editor not found.');
+  // Take PLAIN TEXT (not innerHTML) so we don’t re-interpret existing tags
+  const md = root.innerText.replace(/\r\n/g, '\n');
+
+  const html = mdToHtml(md);
+  root.innerHTML = html;
+  // Keep the editor editable as before
+  root.contentEditable = 'true';
+  setStatus('✅ Rendered Markdown to HTML');
+  // (Optional) run your existing cleaner:
+  // sanitizeHtml();  // uncomment if you want your post-processor to run after render
+}
+
+function mdToHtml(md) {
+  // 0) Helpers
+  const esc = s => String(s)
+    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+
+  // Split to lines once
+  const lines = md.split('\n');
+
+  // 1) Parse fenced code blocks first (```lang ... ```), preserving raw content
+  //    We convert them to a placeholder array to keep them safe during inline parsing.
+  const codeBlocks = [];
+  let out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const fence = lines[i].match(/^```(\w+)?\s*$/);
+    if (fence) {
+      const lang = fence[1] || '';
+      i++;
+      const buf = [];
+      while (i < lines.length && !/^```/.test(lines[i])) {
+        buf.push(lines[i]); i++;
+      }
+      if (i < lines.length && /^```/.test(lines[i])) i++; // consume closing fence
+      const idx = codeBlocks.push({ lang, code: buf.join('\n') }) - 1;
+      out.push(`§§CODEBLOCK_${idx}§§`);
+    } else {
+      out.push(lines[i]);
+      i++;
+    }
+  }
+  let text = out.join('\n');
+
+  // 2) Block-level conversions (order matters)
+
+  // Horizontal rules
+  text = text.replace(/^(?:\s*)(-{3,}|\*{3,}|_{3,})\s*$/gm, '<hr/>');
+
+  // ATX headings: ###### H6 … # H1
+  for (let h = 6; h >= 1; h--) {
+    const re = new RegExp(`^#{${h}}\\s+(.+)$`, 'gm');
+    text = text.replace(re, (_, t) => `<h${h}>${inline(esc(t))}</h${h}>`);
+  }
+
+  // Blockquotes (supports nesting by handling repeatedly)
+  const quoteRe = /^(\s*>[^\n]*\n?(?:[ \t]*\n|$))+?/gm;
+  text = text.replace(quoteRe, blk => {
+    // Strip leading '>' and one space if present
+    const cleaned = blk.replace(/^\s*>\s?/gm, '');
+    return `<blockquote>\n${block(esc(cleaned))}\n</blockquote>`;
+  });
+
+  // Tables (GitHub-style simple): header, separator, rows
+  text = text.replace(
+    /(^|\n)([^\n]*\|[^\n]*?)\n(\s*:?[-| ]+:?\s*)\n((?:[^\n]*\|[^\n]*\n?)+)/g,
+    (_, pfx, head, sep, body) => {
+      const ths = head.split('|').map(h => `<th>${inline(esc(h.trim()))}</th>`).join('');
+      const rows = body.trim().split('\n').map(r => {
+        const tds = r.split('|').map(c => `<td>${inline(esc(c.trim()))}</td>`).join('');
+        return `<tr>${tds}</tr>`;
+      }).join('\n');
+      return `${pfx}<table>\n<thead><tr>${ths}</tr></thead>\n<tbody>\n${rows}\n</tbody>\n</table>\n`;
+    }
+  );
+
+  // Lists (basic nesting by 2/4-space indents)
+  text = parseLists(text);
+
+  // 3) Paragraphs: wrap loose text blocks in <p>…</p>, but don’t touch block tags
+  text = text
+    .split(/\n{2,}/)                // paragraphs separated by blank lines
+    .map(chunk => {
+      const trimmed = chunk.trim();
+      if (!trimmed) return '';
+      // If chunk already starts with a block element, return as-is
+      if (/^<(?:h\d|ul|ol|li|pre|table|blockquote|hr|div|p)/i.test(trimmed)) return trimmed;
+      // Otherwise, treat as <p>
+      return `<p>${inline(esc(trimmed))}</p>`;
+    })
+    .join('\n');
+
+  // 4) Put code blocks back in
+  text = text.replace(/§§CODEBLOCK_(\d+)§§/g, (_, n) => {
+    const { lang, code } = codeBlocks[Number(n)];
+    return `<pre><code${lang ? ` class="language-${lang}"` : ''}>${esc(code)}</code></pre>`;
+  });
+
+  return text;
+
+  // ---- helpers ----
+
+  // Inline: strong/em/code/strike/links/images/autolinks
+  function inline(s) {
+    // code spans: `code`  (protect first)
+    s = s.replace(/`([^`]+?)`/g, (_, t) => `§§CODESPAN_${store(t)}§§`);
+
+    // images ![alt](src "title")
+    s = s.replace(/!\[([^\]]*)\]\((\S+?)(?:\s+"(.*?)")?\)/g,
+      (_, alt, src, title) => `<img src="${esc(src)}" alt="${esc(alt)}"${title ? ` title="${esc(title)}"` : ''}/>`);
+    // links [text](href "title")
+    s = s.replace(/\[([^\]]+)\]\((\S+?)(?:\s+"(.*?)")?\)/g,
+      (_, txt, href, title) => `<a href="${esc(href)}"${title ? ` title="${esc(title)}"` : ''} target="_blank" rel="noopener noreferrer">${txt}</a>`);
+
+    // autolink <http://…>
+    s = s.replace(/<((?:https?:\/\/|mailto:)[^ >]+)>/g, (_, url) =>
+      `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
+
+    // strong + em + strike (handle combined first)
+    s = s.replace(/\*\*\*([^\*]+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    s = s.replace(/___([^_]+?)___/g, '<strong><em>$1</em></strong>');
+    s = s.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_]+?)__/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*]+?)\*/g, '<em>$1</em>');
+    s = s.replace(/_([^_]+?)_/g, '<em>$1</em>');
+    s = s.replace(/~~([^~]+?)~~/g, '<del>$1</del>');
+
+    // restore code spans
+    s = s.replace(/§§CODESPAN_(\d+)§§/g, (_, n) => `<code>${esc(retrieve(Number(n)))}</code>`);
+    return s;
+  }
+
+  // Block-level re-run of inline rules for multi-line segments (quotes, etc.)
+  function block(s) {
+    return s.split('\n').map(line => {
+      if (!line.trim()) return '';
+      return inline(line);
+    }).join('\n');
+  }
+
+  // Simple store for protecting code spans
+  const _store = [];
+  function store(t){ _store.push(t); return _store.length - 1; }
+  function retrieve(n){ return _store[n]; }
+
+  // Basic list parser supporting -, *, + and 1. 2. … with indent-based nesting
+  function parseLists(txt) {
+    const lines = txt.split('\n');
+    const res = [];
+    const stack = []; // each item: {type:'ul'|'ol', indent:int}
+    const bulletRe = /^\s*([*+-])\s+(.*)$/;
+    const numRe    = /^\s*(\d+)\.\s+(.*)$/;
+
+    function open(type, indent) {
+      res.push(`<${type}>`);
+      stack.push({ type, indent });
+    }
+    function closeUntil(indent) {
+      while (stack.length && stack[stack.length-1].indent >= indent) {
+        res.push(`</${stack.pop().type}>`);
+      }
+    }
+
+    for (let i=0; i<lines.length; i++) {
+      const l = lines[i];
+      const mB = l.match(bulletRe);
+      const mN = l.match(numRe);
+      if (mB || mN) {
+        const indent = (l.match(/^\s*/)[0] || '').replace(/\t/g,'    ').length;
+        const type = mB ? 'ul' : 'ol';
+        const text = mB ? mB[2] : mN[2];
+
+        if (!stack.length || indent > stack[stack.length-1].indent) open(type, indent);
+        else if (stack[stack.length-1].type !== type) { closeUntil(0); open(type, indent); }
+        else { closeUntil(indent+1); }
+
+        res.push(`<li>${inline(esc(text))}</li>`);
+      } else {
+        // close any open lists if we hit a non-list line
+        closeUntil(0);
+        res.push(l);
+      }
+    }
+    closeUntil(0);
+    return res.join('\n');
+  }
+}
+
+
+function mdToHtml(md) {
+  // Storage for protecting code spans BEFORE any parsing uses it
+  const _store = [];
+  function store(t){ _store.push(t); return _store.length - 1; }
+  function retrieve(n){ return _store[n]; }
+
+  // Helpers
+  const esc = s => String(s)
+    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+
+  // Split to lines once
+  const lines = md.split('\n');
+
+  // 1) Parse fenced code blocks first (```lang ... ```)
+  const codeBlocks = [];
+  let out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const fence = lines[i].match(/^```(\w+)?\s*$/);
+    if (fence) {
+      const lang = fence[1] || '';
+      i++;
+      const buf = [];
+      while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
+      if (i < lines.length && /^```/.test(lines[i])) i++; // consume closing
+      const idx = codeBlocks.push({ lang, code: buf.join('\n') }) - 1;
+      out.push(`§§CODEBLOCK_${idx}§§`);
+    } else {
+      out.push(lines[i]);
+      i++;
+    }
+  }
+  let text = out.join('\n');
+
+  // 2) Block-level conversions (order matters)
+
+  // Horizontal rules
+  text = text.replace(/^(?:\s*)(-{3,}|\*{3,}|_{3,})\s*$/gm, '<hr/>');
+
+  // ATX headings
+  for (let h = 6; h >= 1; h--) {
+    const re = new RegExp(`^#{${h}}\\s+(.+)$`, 'gm');
+    text = text.replace(re, (_, t) => `<h${h}>${inline(esc(t))}</h${h}>`);
+  }
+
+  // Blockquotes (supports nesting)
+  const quoteRe = /^(\s*>[^\n]*\n?(?:[ \t]*\n|$))+?/gm;
+  text = text.replace(quoteRe, blk => {
+    const cleaned = blk.replace(/^\s*>\s?/gm, '');
+    return `<blockquote>\n${block(esc(cleaned))}\n</blockquote>`;
+  });
+
+  // Tables (simple GFM)
+  text = text.replace(
+    /(^|\n)([^\n]*\|[^\n]*?)\n(\s*:?[-| ]+:?\s*)\n((?:[^\n]*\|[^\n]*\n?)+)/g,
+    (_, pfx, head, sep, body) => {
+      const ths = head.split('|').map(h => `<th>${inline(esc(h.trim()))}</th>`).join('');
+      const rows = body.trim().split('\n').map(r => {
+        const tds = r.split('|').map(c => `<td>${inline(esc(c.trim()))}</td>`).join('');
+        return `<tr>${tds}</tr>`;
+      }).join('\n');
+      return `${pfx}<table>\n<thead><tr>${ths}</tr></thead>\n<tbody>\n${rows}\n</tbody>\n</table>\n`;
+    }
+  );
+
+  // Lists
+  text = parseLists(text);
+
+  // 3) Paragraphs
+  text = text
+    .split(/\n{2,}/)
+    .map(chunk => {
+      const trimmed = chunk.trim();
+      if (!trimmed) return '';
+      if (/^<(?:h\d|ul|ol|li|pre|table|blockquote|hr|div|p)/i.test(trimmed)) return trimmed;
+      return `<p>${inline(esc(trimmed))}</p>`;
+    })
+    .join('\n');
+
+  // 4) Restore code blocks
+  text = text.replace(/§§CODEBLOCK_(\d+)§§/g, (_, n) => {
+    const { lang, code } = codeBlocks[Number(n)];
+    return `<pre><code${lang ? ` class="language-${lang}"` : ''}>${esc(code)}</code></pre>`;
+  });
+
+  return text;
+
+  // ---- helpers inside mdToHtml ----
+
+  // Inline renderer (uses store/retrieve defined ABOVE)
+  function inline(s) {
+    // Protect code spans
+    s = s.replace(/`([^`]+?)`/g, (_, t) => `§§CODESPAN_${store(t)}§§`);
+
+    // Images
+    s = s.replace(/!\[([^\]]*)\]\((\S+?)(?:\s+"(.*?)")?\)/g,
+      (_, alt, src, title) => `<img src="${esc(src)}" alt="${esc(alt)}"${title ? ` title="${esc(title)}"` : ''}/>`);
+    // Links
+    s = s.replace(/\[([^\]]+)\]\((\S+?)(?:\s+"(.*?)")?\)/g,
+      (_, txt, href, title) => `<a href="${esc(href)}"${title ? ` title="${esc(title)}"` : ''} target="_blank" rel="noopener noreferrer">${txt}</a>`);
+    // Autolinks
+    s = s.replace(/<((?:https?:\/\/|mailto:)[^ >]+)>/g, (_, url) =>
+      `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
+
+    // Strong/em/strike
+    s = s.replace(/\*\*\*([^\*]+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    s = s.replace(/___([^_]+?)___/g, '<strong><em>$1</em></strong>');
+    s = s.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_]+?)__/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*]+?)\*/g, '<em>$1</em>');
+    s = s.replace(/_([^_]+?)_/g, '<em>$1</em>');
+    s = s.replace(/~~([^~]+?)~~/g, '<del>$1</del>');
+
+    // Restore code spans
+    s = s.replace(/§§CODESPAN_(\d+)§§/g, (_, n) => `<code>${esc(retrieve(Number(n)))}</code>`);
+    return s;
+  }
+
+  function block(s) {
+    return s.split('\n').map(line => line.trim() ? inline(line) : '').join('\n');
+  }
+
+  // Basic list parser
+  function parseLists(txt) {
+    const lines = txt.split('\n');
+    const res = [];
+    const stack = []; // {type:'ul'|'ol', indent:int}
+    const bulletRe = /^\s*([*+-])\s+(.*)$/;
+    const numRe    = /^\s*(\d+)\.\s+(.*)$/;
+
+    function open(type, indent){ res.push(`<${type}>`); stack.push({type, indent}); }
+    function closeUntil(indent){ while (stack.length && stack[stack.length-1].indent >= indent) res.push(`</${stack.pop().type}>`); }
+
+    for (let i=0;i<lines.length;i++){
+      const l = lines[i];
+      const mB = l.match(bulletRe);
+      const mN = l.match(numRe);
+      if (mB || mN){
+        const indent = (l.match(/^\s*/)[0] || '').replace(/\t/g,'    ').length;
+        const type = mB ? 'ul' : 'ol';
+        const text = mB ? mB[2] : mN[2];
+
+        if (!stack.length || indent > stack[stack.length-1].indent) open(type, indent);
+        else if (stack[stack.length-1].type !== type) { closeUntil(0); open(type, indent); }
+        else { closeUntil(indent+1); }
+
+        res.push(`<li>${inline(esc(text))}</li>`);
+      } else {
+        closeUntil(0);
+        res.push(l);
+      }
+    }
+    closeUntil(0);
+    return res.join('\n');
+  }
+}
+
+// --- Keep your existing mdrender() as-is, or ensure it calls mdToHtml ---
 
 </script>
 
