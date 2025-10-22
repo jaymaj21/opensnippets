@@ -6692,252 +6692,57 @@ function instrjava(startId = 1000) {
 
 /* -------- Markdown → HTML renderer (mdrender) -------- */
 
+/* ========= Public API ========= */
 function mdrender() {
   const root = document.getElementById('editor');
-  if (!root) return alert('#editor not found.');
-  // Take PLAIN TEXT (not innerHTML) so we don’t re-interpret existing tags
+  if (!root) { alert('#editor not found.'); return; }
   const md = root.innerText.replace(/\r\n/g, '\n');
-
   const html = mdToHtml(md);
   root.innerHTML = html;
-  // Keep the editor editable as before
   root.contentEditable = 'true';
-  setStatus('✅ Rendered Markdown to HTML');
-  // (Optional) run your existing cleaner:
-  // sanitizeHtml();  // uncomment if you want your post-processor to run after render
+  if (typeof setStatus === 'function') setStatus('✅ Rendered Markdown to HTML');
+  // if (typeof sanitizeHtml === 'function') sanitizeHtml(); // optional
 }
 
+/* ========= Markdown core (single source of truth) ========= */
 function mdToHtml(md) {
-  // 0) Helpers
+  // Shared store for *all* inline code spans in this render
+  const spanStore = [];
+  const keepSpan  = t => (spanStore.push(t), spanStore.length - 1);
+  const getSpan   = n => spanStore[n] ?? '';
+
   const esc = s => String(s)
     .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 
-  // Split to lines once
+  /* ---- 1) Pull out fenced code blocks first (``` / ~~~, language optional) ---- */
   const lines = md.split('\n');
-
-  // 1) Parse fenced code blocks first (```lang ... ```), preserving raw content
-  //    We convert them to a placeholder array to keep them safe during inline parsing.
   const codeBlocks = [];
-  let out = [];
+  const out = [];
   let i = 0;
   while (i < lines.length) {
-    const fence = lines[i].match(/^```(\w+)?\s*$/);
-    if (fence) {
-      const lang = fence[1] || '';
+    const open = lines[i].match(/^\s*([`~]{3,})\s*([^\s`~]+)?\s*$/);
+    if (open) {
+      const fenceSeq = open[1];
+      const fenceCh  = fenceSeq[0];
+      const fenceLen = fenceSeq.length;
+      const lang     = (open[2] || '').trim().split(/\s+/)[0] || '';
       i++;
+
       const buf = [];
-      while (i < lines.length && !/^```/.test(lines[i])) {
-        buf.push(lines[i]); i++;
-      }
-      if (i < lines.length && /^```/.test(lines[i])) i++; // consume closing fence
+      // Close with same char, length >= opener
+      const closeRe = new RegExp("^\\s*" + fenceCh + "{" + fenceLen + ",}\\s*$");
+      while (i < lines.length && !closeRe.test(lines[i])) { buf.push(lines[i]); i++; }
+      if (i < lines.length) { /* consume closing */ }
       const idx = codeBlocks.push({ lang, code: buf.join('\n') }) - 1;
-      out.push(`§§CODEBLOCK_${idx}§§`);
+      out.push(`§§CODEBLOCK${idx}§§`);
     } else {
       out.push(lines[i]);
-      i++;
     }
+    i++;
   }
   let text = out.join('\n');
 
-  // 2) Block-level conversions (order matters)
-
-  // Horizontal rules
-  text = text.replace(/^(?:\s*)(-{3,}|\*{3,}|_{3,})\s*$/gm, '<hr/>');
-
-  // ATX headings: ###### H6 … # H1
-  for (let h = 6; h >= 1; h--) {
-    const re = new RegExp(`^#{${h}}\\s+(.+)$`, 'gm');
-    text = text.replace(re, (_, t) => `<h${h}>${inline(esc(t))}</h${h}>`);
-  }
-
-  // Blockquotes (supports nesting by handling repeatedly)
-  const quoteRe = /^(\s*>[^\n]*\n?(?:[ \t]*\n|$))+?/gm;
-  text = text.replace(quoteRe, blk => {
-    // Strip leading '>' and one space if present
-    const cleaned = blk.replace(/^\s*>\s?/gm, '');
-    return `<blockquote>\n${block(esc(cleaned))}\n</blockquote>`;
-  });
-
-  // Tables (GitHub-style simple): header, separator, rows
-  text = text.replace(
-    /(^|\n)([^\n]*\|[^\n]*?)\n(\s*:?[-| ]+:?\s*)\n((?:[^\n]*\|[^\n]*\n?)+)/g,
-    (_, pfx, head, sep, body) => {
-      const ths = head.split('|').map(h => `<th>${inline(esc(h.trim()))}</th>`).join('');
-      const rows = body.trim().split('\n').map(r => {
-        const tds = r.split('|').map(c => `<td>${inline(esc(c.trim()))}</td>`).join('');
-        return `<tr>${tds}</tr>`;
-      }).join('\n');
-      return `${pfx}<table>\n<thead><tr>${ths}</tr></thead>\n<tbody>\n${rows}\n</tbody>\n</table>\n`;
-    }
-  );
-
-  // Lists (basic nesting by 2/4-space indents)
-  text = parseLists(text);
-
-  // 3) Paragraphs: wrap loose text blocks in <p>…</p>, but don’t touch block tags
-  text = text
-    .split(/\n{2,}/)                // paragraphs separated by blank lines
-    .map(chunk => {
-      const trimmed = chunk.trim();
-      if (!trimmed) return '';
-      // If chunk already starts with a block element, return as-is
-      if (/^<(?:h\d|ul|ol|li|pre|table|blockquote|hr|div|p)/i.test(trimmed)) return trimmed;
-      // Otherwise, treat as <p>
-      return `<p>${inline(esc(trimmed))}</p>`;
-    })
-    .join('\n');
-
-  // 4) Put code blocks back in
-  text = text.replace(/§§CODEBLOCK_(\d+)§§/g, (_, n) => {
-    const { lang, code } = codeBlocks[Number(n)];
-    return `<pre><code${lang ? ` class="language-${lang}"` : ''}>${esc(code)}</code></pre>`;
-  });
-
-  return text;
-
-  // ---- helpers ----
-
-  // Inline: strong/em/code/strike/links/images/autolinks
-  function inline(s) {
-    // code spans: `code`  (protect first)
-    s = s.replace(/`([^`]+?)`/g, (_, t) => `§§CODESPAN_${store(t)}§§`);
-
-    // images ![alt](src "title")
-    s = s.replace(/!\[([^\]]*)\]\((\S+?)(?:\s+"(.*?)")?\)/g,
-      (_, alt, src, title) => `<img src="${esc(src)}" alt="${esc(alt)}"${title ? ` title="${esc(title)}"` : ''}/>`);
-    // links [text](href "title")
-    s = s.replace(/\[([^\]]+)\]\((\S+?)(?:\s+"(.*?)")?\)/g,
-      (_, txt, href, title) => `<a href="${esc(href)}"${title ? ` title="${esc(title)}"` : ''} target="_blank" rel="noopener noreferrer">${txt}</a>`);
-
-    // autolink <http://…>
-    s = s.replace(/<((?:https?:\/\/|mailto:)[^ >]+)>/g, (_, url) =>
-      `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
-
-    // strong + em + strike (handle combined first)
-    s = s.replace(/\*\*\*([^\*]+?)\*\*\*/g, '<strong><em>$1</em></strong>');
-    s = s.replace(/___([^_]+?)___/g, '<strong><em>$1</em></strong>');
-    s = s.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
-    s = s.replace(/__([^_]+?)__/g, '<strong>$1</strong>');
-    s = s.replace(/\*([^*]+?)\*/g, '<em>$1</em>');
-    s = s.replace(/_([^_]+?)_/g, '<em>$1</em>');
-    s = s.replace(/~~([^~]+?)~~/g, '<del>$1</del>');
-
-    // restore code spans
-    s = s.replace(/§§CODESPAN_(\d+)§§/g, (_, n) => `<code>${esc(retrieve(Number(n)))}</code>`);
-    return s;
-  }
-
-  // Block-level re-run of inline rules for multi-line segments (quotes, etc.)
-  function block(s) {
-    return s.split('\n').map(line => {
-      if (!line.trim()) return '';
-      return inline(line);
-    }).join('\n');
-  }
-
-  // Simple store for protecting code spans
-  const _store = [];
-  function store(t){ _store.push(t); return _store.length - 1; }
-  function retrieve(n){ return _store[n]; }
-
-  // Basic list parser supporting -, *, + and 1. 2. … with indent-based nesting
-  function parseLists(txt) {
-    const lines = txt.split('\n');
-    const res = [];
-    const stack = []; // each item: {type:'ul'|'ol', indent:int}
-    const bulletRe = /^\s*([*+-])\s+(.*)$/;
-    const numRe    = /^\s*(\d+)\.\s+(.*)$/;
-
-    function open(type, indent) {
-      res.push(`<${type}>`);
-      stack.push({ type, indent });
-    }
-    function closeUntil(indent) {
-      while (stack.length && stack[stack.length-1].indent >= indent) {
-        res.push(`</${stack.pop().type}>`);
-      }
-    }
-
-    for (let i=0; i<lines.length; i++) {
-      const l = lines[i];
-      const mB = l.match(bulletRe);
-      const mN = l.match(numRe);
-      if (mB || mN) {
-        const indent = (l.match(/^\s*/)[0] || '').replace(/\t/g,'    ').length;
-        const type = mB ? 'ul' : 'ol';
-        const text = mB ? mB[2] : mN[2];
-
-        if (!stack.length || indent > stack[stack.length-1].indent) open(type, indent);
-        else if (stack[stack.length-1].type !== type) { closeUntil(0); open(type, indent); }
-        else { closeUntil(indent+1); }
-
-        res.push(`<li>${inline(esc(text))}</li>`);
-      } else {
-        // close any open lists if we hit a non-list line
-        closeUntil(0);
-        res.push(l);
-      }
-    }
-    closeUntil(0);
-    return res.join('\n');
-  }
-}
-
-
-function mdToHtml(md) {
-  // Storage for protecting code spans BEFORE any parsing uses it
-  const _store = [];
-  function store(t){ _store.push(t); return _store.length - 1; }
-  function retrieve(n){ return _store[n]; }
-
-  // Helpers
-  const esc = s => String(s)
-    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
-
-  // Split to lines once
-  const lines = md.split('\n');
-
-
-// 1) Parse fenced code blocks first (```lang ... ``` or ~~~lang ... ~~~)
-const codeBlocks = [];
-const out = [];
-let i = 0;
-while (i < lines.length) {
-  // Match opening fence: optional indent, fence of ` or ~ (len ≥ 3), optional info string
-  const open = lines[i].match(/^\s*([`~]{3,})\s*([^\s`~]+)?\s*$/);
-  if (open) {
-    const fenceSeq = open[1];                 // e.g., "```" or "~~~~"
-    const fenceChar = fenceSeq[0];            // '`' or '~'
-    const fenceLen  = fenceSeq.length;        // 3, 4, ...
-    const info      = (open[2] || '').trim(); // take first token as language
-    const lang = info.split(/\s+/)[0] || '';
-
-    i++; // skip opening fence line
-    const buf = [];
-
-    // Build a closing fence regex using same char and length ≥ opener
-    const closeRe = new RegExp("^\\s*" + fenceChar.repeat(fenceLen) + "{0,}" + fenceChar + "*\\s*$");
-    // The above allows ≥ fenceLen of the same char (simpler/robust). If you prefer exact:
-    // const closeRe = new RegExp("^\\s*" + fenceChar + "{" + fenceLen + ",}\\s*$");
-
-    while (i < lines.length && !closeRe.test(lines[i])) {
-      buf.push(lines[i]);
-      i++;
-    }
-    // Consume closing fence if present
-    if (i < lines.length && closeRe.test(lines[i])) i++;
-
-    const idx = codeBlocks.push({ lang, code: buf.join('\n') }) - 1;
-    out.push(`§§CODEBLOCK_${idx}§§`);
-  } else {
-    out.push(lines[i]);
-    i++;
-  }
-}
-let text = out.join('\n');
-
-
-  // 2) Block-level conversions (order matters)
+  /* ---- 2) Block-level transforms (order matters) ---- */
 
   // Horizontal rules
   text = text.replace(/^(?:\s*)(-{3,}|\*{3,}|_{3,})\s*$/gm, '<hr/>');
@@ -6949,8 +6754,7 @@ let text = out.join('\n');
   }
 
   // Blockquotes (supports nesting)
-  const quoteRe = /^(\s*>[^\n]*\n?(?:[ \t]*\n|$))+?/gm;
-  text = text.replace(quoteRe, blk => {
+  text = text.replace(/^(\s*>[^\n]*\n?(?:[ \t]*\n|$))+?/gm, blk => {
     const cleaned = blk.replace(/^\s*>\s?/gm, '');
     return `<blockquote>\n${block(esc(cleaned))}\n</blockquote>`;
   });
@@ -6958,7 +6762,7 @@ let text = out.join('\n');
   // Tables (simple GFM)
   text = text.replace(
     /(^|\n)([^\n]*\|[^\n]*?)\n(\s*:?[-| ]+:?\s*)\n((?:[^\n]*\|[^\n]*\n?)+)/g,
-    (_, pfx, head, sep, body) => {
+    (_, pfx, head, _sep, body) => {
       const ths = head.split('|').map(h => `<th>${inline(esc(h.trim()))}</th>`).join('');
       const rows = body.trim().split('\n').map(r => {
         const tds = r.split('|').map(c => `<td>${inline(esc(c.trim()))}</td>`).join('');
@@ -6968,47 +6772,84 @@ let text = out.join('\n');
     }
   );
 
-  // Lists
+  // Lists (bulleted + numbered) with basic indent nesting
   text = parseLists(text);
 
-  // 3) Paragraphs
+  // Paragraphs
   text = text
     .split(/\n{2,}/)
     .map(chunk => {
-      const trimmed = chunk.trim();
-      if (!trimmed) return '';
-      if (/^<(?:h\d|ul|ol|li|pre|table|blockquote|hr|div|p)/i.test(trimmed)) return trimmed;
-      return `<p>${inline(esc(trimmed))}</p>`;
+      const t = chunk.trim();
+      if (!t) return '';
+      if (/^<(?:h\d|ul|ol|li|pre|table|blockquote|hr|div|p)/i.test(t)) return t;
+      return `<p>${inline(esc(t))}</p>`;
     })
     .join('\n');
 
-  // 4) Restore code blocks
-  text = text.replace(/§§CODEBLOCK_(\d+)§§/g, (_, n) => {
-    const { lang, code } = codeBlocks[Number(n)];
-    return `<pre><code${lang ? ` class="language-${lang}"` : ''}>${esc(code)}</code></pre>`;
+  /* ---- 3) Restore fenced code blocks ---- */
+  text = text.replaceAll(/§§CODEBLOCK(\d+)§§/g, (_, n) => {
+    const blk = codeBlocks[Number(n)] || { lang:'', code:'' };
+    return `<pre><code${blk.lang ? ` class="language-${blk.lang}"` : ''}>${esc(blk.code)}</code></pre>`;
   });
+
+  // ---- 4) FINAL: restore *all* inline code placeholders (underscore OR legacy no-underscore) ----
+ // FINAL: underscore OR legacy no-underscore — replace *all* occurrences
+text = text.replace(/§§CODESPAN(\d+)§§/g,
+  (_, n) => `<code>${esc(getSpan(Number(n))) || ''}</code>`
+);
+
+// (Optional ultra-defensive cleanup: if *anything* still remains, strip it)
+text = text.replace(/§§CODESPAN\d+§§/g, '<code></code>');
 
   return text;
 
-  // ---- helpers inside mdToHtml ----
+  /* ================= helpers (scoped) ================= */
 
-  // Inline renderer (uses store/retrieve defined ABOVE)
+  // Inline formatter: protects code spans → does NOT restore here
   function inline(s) {
-    // Protect code spans
-    s = s.replace(/`([^`]+?)`/g, (_, t) => `§§CODESPAN_${store(t)}§§`);
+    // A) Protect inline code with a backtick-run aware scanner (same-line only)
+    let res = '', i = 0;
+    while (i < s.length) {
+      if (s[i] === '`') {
+        let j = i; while (j < s.length && s[j] === '`') j++;
+        const runLen = j - i;
+        // find matching run on same line
+        let k = j, close = -1;
+        while (k < s.length && s[k] !== '\n') {
+          if (s[k] === '`') {
+            let m = k; while (m < s.length && s[m] === '`') m++;
+            if (m - k === runLen) { close = k; break; }
+            k = m;
+          } else k++;
+        }
+        if (close !== -1) {
+          const code = s.slice(j, close);
+          const id = keepSpan(code);
+          res += `§§CODESPAN${id}§§`;
+          i = close + runLen;
+          continue;
+        }
+        // unmatched: literal backtick
+        res += '`'; i++; continue;
+      }
+      res += s[i++];
+    }
+    s = res;
 
-    // Images
+    // B) Images
     s = s.replace(/!\[([^\]]*)\]\((\S+?)(?:\s+"(.*?)")?\)/g,
       (_, alt, src, title) => `<img src="${esc(src)}" alt="${esc(alt)}"${title ? ` title="${esc(title)}"` : ''}/>`);
-    // Links
+
+    // C) Links
     s = s.replace(/\[([^\]]+)\]\((\S+?)(?:\s+"(.*?)")?\)/g,
-      (_, txt, href, title) => `<a href="${esc(href)}"${title ? ` title="${esc(title)}"` : ''} target="_blank" rel="noopener noreferrer">${txt}</a>`);
-    // Autolinks
+      (_, txt, href, title) => `<a href="${esc(href)}"${title ? ` title="${esc(title)}"` : ''} target="_blank" rel="noopener noreferrer">${esc(txt)}</a>`);
+
+    // D) Autolinks
     s = s.replace(/<((?:https?:\/\/|mailto:)[^ >]+)>/g, (_, url) =>
       `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
 
-    // Strong/em/strike
-    s = s.replace(/\*\*\*([^\*]+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    // E) Emphasis/strong/strike
+    s = s.replace(/\*\*\*([^*]+?)\*\*\*/g, '<strong><em>$1</em></strong>');
     s = s.replace(/___([^_]+?)___/g, '<strong><em>$1</em></strong>');
     s = s.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
     s = s.replace(/__([^_]+?)__/g, '<strong>$1</strong>');
@@ -7016,20 +6857,20 @@ let text = out.join('\n');
     s = s.replace(/_([^_]+?)_/g, '<em>$1</em>');
     s = s.replace(/~~([^~]+?)~~/g, '<del>$1</del>');
 
-    // Restore code spans
-    s = s.replace(/§§CODESPAN_(\d+)§§/g, (_, n) => `<code>${esc(retrieve(Number(n)))}</code>`);
+    // F) Do NOT restore here — only once at the end
     return s;
   }
 
+  // Block helper: run inline line-by-line
   function block(s) {
     return s.split('\n').map(line => line.trim() ? inline(line) : '').join('\n');
   }
 
-  // Basic list parser
+  // Lists with basic indent-based nesting (- * + and 1.)
   function parseLists(txt) {
     const lines = txt.split('\n');
     const res = [];
-    const stack = []; // {type:'ul'|'ol', indent:int}
+    const stack = []; // {type:'ul'|'ol', indent}
     const bulletRe = /^\s*([*+-])\s+(.*)$/;
     const numRe    = /^\s*(\d+)\.\s+(.*)$/;
 
@@ -7044,11 +6885,9 @@ let text = out.join('\n');
         const indent = (l.match(/^\s*/)[0] || '').replace(/\t/g,'    ').length;
         const type = mB ? 'ul' : 'ol';
         const text = mB ? mB[2] : mN[2];
-
         if (!stack.length || indent > stack[stack.length-1].indent) open(type, indent);
         else if (stack[stack.length-1].type !== type) { closeUntil(0); open(type, indent); }
         else { closeUntil(indent+1); }
-
         res.push(`<li>${inline(esc(text))}</li>`);
       } else {
         closeUntil(0);
@@ -7059,8 +6898,7 @@ let text = out.join('\n');
     return res.join('\n');
   }
 }
-
-// --- Keep your existing mdrender() as-is, or ensure it calls mdToHtml ---
+/* --------END  Markdown → HTML renderer (mdrender) -------- */
 
 </script>
 
