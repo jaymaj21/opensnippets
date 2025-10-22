@@ -6897,26 +6897,45 @@ function mdToHtml(md) {
   // Split to lines once
   const lines = md.split('\n');
 
-  // 1) Parse fenced code blocks first (```lang ... ```)
-  const codeBlocks = [];
-  let out = [];
-  let i = 0;
-  while (i < lines.length) {
-    const fence = lines[i].match(/^```(\w+)?\s*$/);
-    if (fence) {
-      const lang = fence[1] || '';
-      i++;
-      const buf = [];
-      while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
-      if (i < lines.length && /^```/.test(lines[i])) i++; // consume closing
-      const idx = codeBlocks.push({ lang, code: buf.join('\n') }) - 1;
-      out.push(`§§CODEBLOCK_${idx}§§`);
-    } else {
-      out.push(lines[i]);
+
+// 1) Parse fenced code blocks first (```lang ... ``` or ~~~lang ... ~~~)
+const codeBlocks = [];
+const out = [];
+let i = 0;
+while (i < lines.length) {
+  // Match opening fence: optional indent, fence of ` or ~ (len ≥ 3), optional info string
+  const open = lines[i].match(/^\s*([`~]{3,})\s*([^\s`~]+)?\s*$/);
+  if (open) {
+    const fenceSeq = open[1];                 // e.g., "```" or "~~~~"
+    const fenceChar = fenceSeq[0];            // '`' or '~'
+    const fenceLen  = fenceSeq.length;        // 3, 4, ...
+    const info      = (open[2] || '').trim(); // take first token as language
+    const lang = info.split(/\s+/)[0] || '';
+
+    i++; // skip opening fence line
+    const buf = [];
+
+    // Build a closing fence regex using same char and length ≥ opener
+    const closeRe = new RegExp("^\\s*" + fenceChar.repeat(fenceLen) + "{0,}" + fenceChar + "*\\s*$");
+    // The above allows ≥ fenceLen of the same char (simpler/robust). If you prefer exact:
+    // const closeRe = new RegExp("^\\s*" + fenceChar + "{" + fenceLen + ",}\\s*$");
+
+    while (i < lines.length && !closeRe.test(lines[i])) {
+      buf.push(lines[i]);
       i++;
     }
+    // Consume closing fence if present
+    if (i < lines.length && closeRe.test(lines[i])) i++;
+
+    const idx = codeBlocks.push({ lang, code: buf.join('\n') }) - 1;
+    out.push(`§§CODEBLOCK_${idx}§§`);
+  } else {
+    out.push(lines[i]);
+    i++;
   }
-  let text = out.join('\n');
+}
+let text = out.join('\n');
+
 
   // 2) Block-level conversions (order matters)
 
