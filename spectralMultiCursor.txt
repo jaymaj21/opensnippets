@@ -1664,7 +1664,118 @@ function showHtmlInsertPrompt() {
     showTextPopup(insertHtmlAtSavedRange, '');
 }
 
-// ... (rest of your script remains unchanged)
+// ... inserting html from selection
+/**
+ * Convert the current non-empty selection (inside #editor) into HTML inserted
+ * at the BEGINNING of the selection, then collapse caret after the inserted HTML.
+ * Returns:
+ *   true  → did the transform,
+ *   false → no selection (collapsed) so *not* transformed,
+ *   null  → selection isn’t inside #editor.
+ */
+function convertSelectionTextToHTML() {
+  const editor = document.getElementById('editor');
+  if (!editor) return null;
+
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return false;
+  const range = sel.getRangeAt(0);
+
+  // Ensure selection is inside #editor
+  const container = range.commonAncestorContainer.nodeType === 1
+    ? range.commonAncestorContainer
+    : range.commonAncestorContainer.parentNode;
+  if (!editor.contains(container)) return null;
+
+  if (sel.isCollapsed) return false; // no selection → let caller open the dialog
+
+  // Grab the selected *text* (literal, not HTML nodes)
+  const literal = range.toString();
+  if (!literal) return false;
+
+  // Remember the start point before deletion
+  const startContainer = range.startContainer;
+  const startOffset = range.startOffset;
+
+  // Remove the selected content
+  range.deleteContents();
+
+  // Create a new collapsed range at original start
+  const insertRange = document.createRange();
+  try {
+    insertRange.setStart(startContainer, Math.min(startOffset, nodeTextLength(startContainer)));
+  } catch (_) {
+    // If startContainer became invalid due to deleteContents(), fall back to editor start
+    insertRange.setStart(editor, 0);
+  }
+  insertRange.collapse(true);
+
+  // Parse the literal string as HTML and insert it
+  const frag = createFragmentFromHTML(literal, insertRange);
+  const lastNode = frag.lastChild;
+  insertRange.insertNode(frag);
+
+  // Place caret after inserted HTML
+  const after = document.createRange();
+  if (lastNode) {
+    after.setStartAfter(lastNode);
+    after.collapse(true);
+  } else {
+    after.setStart(insertRange.startContainer, insertRange.startOffset);
+    after.collapse(true);
+  }
+  sel.removeAllRanges();
+  sel.addRange(after);
+
+  if (typeof setStatus === 'function') setStatus('✅ Inserted selection as HTML');
+  return true;
+}
+
+/* ---------- Utilities ---------- */
+/** Create a DocumentFragment from an HTML string, contextual to a range (best parsing). */
+function createFragmentFromHTML(html, rangeForContext) {
+  if (rangeForContext && typeof rangeForContext.createContextualFragment === 'function') {
+    // Use contextual parsing so <tr>, <td>, etc. behave correctly if relevant
+    return rangeForContext.createContextualFragment(html);
+  }
+  // Fallback parser
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+  const frag = document.createDocumentFragment();
+  while (temp.firstChild) frag.appendChild(temp.firstChild);
+  return frag;
+}
+
+/** Insert arbitrary HTML at the caret (used for the collapsed-selection case). */
+function insertHtmlAtCaret(html) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+  range.deleteContents();
+  const frag = createFragmentFromHTML(html, range);
+  const lastNode = frag.lastChild;
+  range.insertNode(frag);
+  if (lastNode) {
+    const after = document.createRange();
+    after.setStartAfter(lastNode);
+    after.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(after);
+  }
+}
+
+/** Safe way to get text length of a node (for setStart bounds). */
+function nodeTextLength(node) {
+  if (!node) return 0;
+  if (node.nodeType === Node.TEXT_NODE) return node.data.length;
+  // Sum of text lengths of child nodes
+  let len = 0;
+  node.childNodes.forEach(n => len += nodeTextLength(n));
+  return len;
+} 
+
+// END inserting html from selection
+// matching brackets
 
 function matchAndHighlightBrackets() {
   const editor = document.getElementById('editor');
@@ -1971,9 +2082,14 @@ document.addEventListener('keydown', function(event) {
                 showTools();
             }
         } else  if (event.key.toLowerCase() === 'i') {
-           event.preventDefault();
-           showHtmlInsertPrompt();
-        } else if(event.key.toLowerCase() === 'h') {
+           const handled = convertSelectionTextToHTML();
+           if (handled === true) {
+              event.preventDefault();
+           } else if (handled === false) { 
+              event.preventDefault();
+              showHtmlInsertPrompt();
+           }
+       } else if(event.key.toLowerCase() === 'h') {
            event.preventDefault();
            help();
         } else if (/^[1-7]$/.test(event.key)) { 
@@ -6690,6 +6806,215 @@ function instrjava(startId = 1000) {
 }
 
 
+/* -------- Markdown → HTML renderer (mdrender) -------- */
+
+/* ========= Public API ========= */
+function mdrender() {
+  const root = document.getElementById('editor');
+  if (!root) { alert('#editor not found.'); return; }
+  const md = root.innerText.replace(/\r\n/g, '\n');
+  const html = mdToHtml(md);
+  root.innerHTML = html;
+  root.contentEditable = 'true';
+  if (typeof setStatus === 'function') setStatus('✅ Rendered Markdown to HTML');
+  // if (typeof sanitizeHtml === 'function') sanitizeHtml(); // optional
+}
+
+/* ========= Markdown core (single source of truth) ========= */
+function mdToHtml(md) {
+  // Shared store for *all* inline code spans in this render
+  const spanStore = [];
+  const keepSpan  = t => (spanStore.push(t), spanStore.length - 1);
+  const getSpan   = n => spanStore[n] ?? '';
+
+  const esc = s => String(s)
+    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+
+  /* ---- 1) Pull out fenced code blocks first (``` / ~~~, language optional) ---- */
+  const lines = md.split('\n');
+  const codeBlocks = [];
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const open = lines[i].match(/^\s*([`~]{3,})\s*([^\s`~]+)?\s*$/);
+    if (open) {
+      const fenceSeq = open[1];
+      const fenceCh  = fenceSeq[0];
+      const fenceLen = fenceSeq.length;
+      const lang     = (open[2] || '').trim().split(/\s+/)[0] || '';
+      i++;
+
+      const buf = [];
+      // Close with same char, length >= opener
+      const closeRe = new RegExp("^\\s*" + fenceCh + "{" + fenceLen + ",}\\s*$");
+      while (i < lines.length && !closeRe.test(lines[i])) { buf.push(lines[i]); i++; }
+      if (i < lines.length) { /* consume closing */ }
+      const idx = codeBlocks.push({ lang, code: buf.join('\n') }) - 1;
+      out.push(`§§CODEBLOCK${idx}§§`);
+    } else {
+      out.push(lines[i]);
+    }
+    i++;
+  }
+  let text = out.join('\n');
+
+  /* ---- 2) Block-level transforms (order matters) ---- */
+
+  // Horizontal rules
+  text = text.replace(/^(?:\s*)(-{3,}|\*{3,}|_{3,})\s*$/gm, '<hr/>');
+
+  // ATX headings
+  for (let h = 6; h >= 1; h--) {
+    const re = new RegExp(`^#{${h}}\\s+(.+)$`, 'gm');
+    text = text.replace(re, (_, t) => `<h${h}>${inline(esc(t))}</h${h}>`);
+  }
+
+  // Blockquotes (supports nesting)
+  text = text.replace(/^(\s*>[^\n]*\n?(?:[ \t]*\n|$))+?/gm, blk => {
+    const cleaned = blk.replace(/^\s*>\s?/gm, '');
+    return `<blockquote>\n${block(esc(cleaned))}\n</blockquote>`;
+  });
+
+  // Tables (simple GFM)
+  text = text.replace(
+    /(^|\n)([^\n]*\|[^\n]*?)\n(\s*:?[-| ]+:?\s*)\n((?:[^\n]*\|[^\n]*\n?)+)/g,
+    (_, pfx, head, _sep, body) => {
+      const ths = head.split('|').map(h => `<th>${inline(esc(h.trim()))}</th>`).join('');
+      const rows = body.trim().split('\n').map(r => {
+        const tds = r.split('|').map(c => `<td>${inline(esc(c.trim()))}</td>`).join('');
+        return `<tr>${tds}</tr>`;
+      }).join('\n');
+      return `${pfx}<table>\n<thead><tr>${ths}</tr></thead>\n<tbody>\n${rows}\n</tbody>\n</table>\n`;
+    }
+  );
+
+  // Lists (bulleted + numbered) with basic indent nesting
+  text = parseLists(text);
+
+  // Paragraphs
+  text = text
+    .split(/\n{2,}/)
+    .map(chunk => {
+      const t = chunk.trim();
+      if (!t) return '';
+      if (/^<(?:h\d|ul|ol|li|pre|table|blockquote|hr|div|p)/i.test(t)) return t;
+      return `<p>${inline(esc(t))}</p>`;
+    })
+    .join('\n');
+
+  /* ---- 3) Restore fenced code blocks ---- */
+  text = text.replaceAll(/§§CODEBLOCK(\d+)§§/g, (_, n) => {
+    const blk = codeBlocks[Number(n)] || { lang:'', code:'' };
+    return `<pre><code${blk.lang ? ` class="language-${blk.lang}"` : ''}>${esc(blk.code)}</code></pre>`;
+  });
+
+  // ---- 4) FINAL: restore *all* inline code placeholders (underscore OR legacy no-underscore) ----
+ // FINAL: underscore OR legacy no-underscore — replace *all* occurrences
+text = text.replace(/§§CODESPAN(\d+)§§/g,
+  (_, n) => `<code>${esc(getSpan(Number(n))) || ''}</code>`
+);
+
+// (Optional ultra-defensive cleanup: if *anything* still remains, strip it)
+text = text.replace(/§§CODESPAN\d+§§/g, '<code></code>');
+
+  return text;
+
+  /* ================= helpers (scoped) ================= */
+
+  // Inline formatter: protects code spans → does NOT restore here
+  function inline(s) {
+    // A) Protect inline code with a backtick-run aware scanner (same-line only)
+    let res = '', i = 0;
+    while (i < s.length) {
+      if (s[i] === '`') {
+        let j = i; while (j < s.length && s[j] === '`') j++;
+        const runLen = j - i;
+        // find matching run on same line
+        let k = j, close = -1;
+        while (k < s.length && s[k] !== '\n') {
+          if (s[k] === '`') {
+            let m = k; while (m < s.length && s[m] === '`') m++;
+            if (m - k === runLen) { close = k; break; }
+            k = m;
+          } else k++;
+        }
+        if (close !== -1) {
+          const code = s.slice(j, close);
+          const id = keepSpan(code);
+          res += `§§CODESPAN${id}§§`;
+          i = close + runLen;
+          continue;
+        }
+        // unmatched: literal backtick
+        res += '`'; i++; continue;
+      }
+      res += s[i++];
+    }
+    s = res;
+
+    // B) Images
+    s = s.replace(/!\[([^\]]*)\]\((\S+?)(?:\s+"(.*?)")?\)/g,
+      (_, alt, src, title) => `<img src="${esc(src)}" alt="${esc(alt)}"${title ? ` title="${esc(title)}"` : ''}/>`);
+
+    // C) Links
+    s = s.replace(/\[([^\]]+)\]\((\S+?)(?:\s+"(.*?)")?\)/g,
+      (_, txt, href, title) => `<a href="${esc(href)}"${title ? ` title="${esc(title)}"` : ''} target="_blank" rel="noopener noreferrer">${esc(txt)}</a>`);
+
+    // D) Autolinks
+    s = s.replace(/<((?:https?:\/\/|mailto:)[^ >]+)>/g, (_, url) =>
+      `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
+
+    // E) Emphasis/strong/strike
+    s = s.replace(/\*\*\*([^*]+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    s = s.replace(/___([^_]+?)___/g, '<strong><em>$1</em></strong>');
+    s = s.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_]+?)__/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*]+?)\*/g, '<em>$1</em>');
+    s = s.replace(/_([^_]+?)_/g, '<em>$1</em>');
+    s = s.replace(/~~([^~]+?)~~/g, '<del>$1</del>');
+
+    // F) Do NOT restore here — only once at the end
+    return s;
+  }
+
+  // Block helper: run inline line-by-line
+  function block(s) {
+    return s.split('\n').map(line => line.trim() ? inline(line) : '').join('\n');
+  }
+
+  // Lists with basic indent-based nesting (- * + and 1.)
+  function parseLists(txt) {
+    const lines = txt.split('\n');
+    const res = [];
+    const stack = []; // {type:'ul'|'ol', indent}
+    const bulletRe = /^\s*([*+-])\s+(.*)$/;
+    const numRe    = /^\s*(\d+)\.\s+(.*)$/;
+
+    function open(type, indent){ res.push(`<${type}>`); stack.push({type, indent}); }
+    function closeUntil(indent){ while (stack.length && stack[stack.length-1].indent >= indent) res.push(`</${stack.pop().type}>`); }
+
+    for (let i=0;i<lines.length;i++){
+      const l = lines[i];
+      const mB = l.match(bulletRe);
+      const mN = l.match(numRe);
+      if (mB || mN){
+        const indent = (l.match(/^\s*/)[0] || '').replace(/\t/g,'    ').length;
+        const type = mB ? 'ul' : 'ol';
+        const text = mB ? mB[2] : mN[2];
+        if (!stack.length || indent > stack[stack.length-1].indent) open(type, indent);
+        else if (stack[stack.length-1].type !== type) { closeUntil(0); open(type, indent); }
+        else { closeUntil(indent+1); }
+        res.push(`<li>${inline(esc(text))}</li>`);
+      } else {
+        closeUntil(0);
+        res.push(l);
+      }
+    }
+    closeUntil(0);
+    return res.join('\n');
+  }
+}
+/* --------END  Markdown → HTML renderer (mdrender) -------- */
 
 </script>
 
@@ -6862,6 +7187,7 @@ Text Commands (Can be used with Javascript Eval):
 <script>hideTools()</script>
 </body>
 </html>
+
 
 
 
