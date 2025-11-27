@@ -1664,7 +1664,118 @@ function showHtmlInsertPrompt() {
     showTextPopup(insertHtmlAtSavedRange, '');
 }
 
-// ... (rest of your script remains unchanged)
+// ... inserting html from selection
+/**
+ * Convert the current non-empty selection (inside #editor) into HTML inserted
+ * at the BEGINNING of the selection, then collapse caret after the inserted HTML.
+ * Returns:
+ *   true  → did the transform,
+ *   false → no selection (collapsed) so *not* transformed,
+ *   null  → selection isn’t inside #editor.
+ */
+function convertSelectionTextToHTML() {
+  const editor = document.getElementById('editor');
+  if (!editor) return null;
+
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return false;
+  const range = sel.getRangeAt(0);
+
+  // Ensure selection is inside #editor
+  const container = range.commonAncestorContainer.nodeType === 1
+    ? range.commonAncestorContainer
+    : range.commonAncestorContainer.parentNode;
+  if (!editor.contains(container)) return null;
+
+  if (sel.isCollapsed) return false; // no selection → let caller open the dialog
+
+  // Grab the selected *text* (literal, not HTML nodes)
+  const literal = range.toString();
+  if (!literal) return false;
+
+  // Remember the start point before deletion
+  const startContainer = range.startContainer;
+  const startOffset = range.startOffset;
+
+  // Remove the selected content
+  range.deleteContents();
+
+  // Create a new collapsed range at original start
+  const insertRange = document.createRange();
+  try {
+    insertRange.setStart(startContainer, Math.min(startOffset, nodeTextLength(startContainer)));
+  } catch (_) {
+    // If startContainer became invalid due to deleteContents(), fall back to editor start
+    insertRange.setStart(editor, 0);
+  }
+  insertRange.collapse(true);
+
+  // Parse the literal string as HTML and insert it
+  const frag = createFragmentFromHTML(literal, insertRange);
+  const lastNode = frag.lastChild;
+  insertRange.insertNode(frag);
+
+  // Place caret after inserted HTML
+  const after = document.createRange();
+  if (lastNode) {
+    after.setStartAfter(lastNode);
+    after.collapse(true);
+  } else {
+    after.setStart(insertRange.startContainer, insertRange.startOffset);
+    after.collapse(true);
+  }
+  sel.removeAllRanges();
+  sel.addRange(after);
+
+  if (typeof setStatus === 'function') setStatus('✅ Inserted selection as HTML');
+  return true;
+}
+
+/* ---------- Utilities ---------- */
+/** Create a DocumentFragment from an HTML string, contextual to a range (best parsing). */
+function createFragmentFromHTML(html, rangeForContext) {
+  if (rangeForContext && typeof rangeForContext.createContextualFragment === 'function') {
+    // Use contextual parsing so <tr>, <td>, etc. behave correctly if relevant
+    return rangeForContext.createContextualFragment(html);
+  }
+  // Fallback parser
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+  const frag = document.createDocumentFragment();
+  while (temp.firstChild) frag.appendChild(temp.firstChild);
+  return frag;
+}
+
+/** Insert arbitrary HTML at the caret (used for the collapsed-selection case). */
+function insertHtmlAtCaret(html) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+  range.deleteContents();
+  const frag = createFragmentFromHTML(html, range);
+  const lastNode = frag.lastChild;
+  range.insertNode(frag);
+  if (lastNode) {
+    const after = document.createRange();
+    after.setStartAfter(lastNode);
+    after.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(after);
+  }
+}
+
+/** Safe way to get text length of a node (for setStart bounds). */
+function nodeTextLength(node) {
+  if (!node) return 0;
+  if (node.nodeType === Node.TEXT_NODE) return node.data.length;
+  // Sum of text lengths of child nodes
+  let len = 0;
+  node.childNodes.forEach(n => len += nodeTextLength(n));
+  return len;
+} 
+
+// END inserting html from selection
+// matching brackets
 
 function matchAndHighlightBrackets() {
   const editor = document.getElementById('editor');
@@ -1971,9 +2082,14 @@ document.addEventListener('keydown', function(event) {
                 showTools();
             }
         } else  if (event.key.toLowerCase() === 'i') {
-           event.preventDefault();
-           showHtmlInsertPrompt();
-        } else if(event.key.toLowerCase() === 'h') {
+           const handled = convertSelectionTextToHTML();
+           if (handled === true) {
+              event.preventDefault();
+           } else if (handled === false) { 
+              event.preventDefault();
+              showHtmlInsertPrompt();
+           }
+       } else if(event.key.toLowerCase() === 'h') {
            event.preventDefault();
            help();
         } else if (/^[1-7]$/.test(event.key)) { 
@@ -7071,6 +7187,7 @@ Text Commands (Can be used with Javascript Eval):
 <script>hideTools()</script>
 </body>
 </html>
+
 
 
 
