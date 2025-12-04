@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -6891,14 +6891,48 @@ function mdToHtml(md) {
   // Lists (bulleted + numbered) with basic indent nesting
   text = parseLists(text);
 
-  // Paragraphs
+  // Paragraphs (preserve raw HTML blocks instead of escaping them)
+  const blockHtmlBoundary = /^\s*<\/?(?:h\d|ul|ol|li|pre|table|blockquote|hr|div|p|section|article|header|footer|figure|details|summary)\b/i;
   text = text
     .split(/\n{2,}/)
     .map(chunk => {
-      const t = chunk.trim();
-      if (!t) return '';
-      if (/^<(?:h\d|ul|ol|li|pre|table|blockquote|hr|div|p)/i.test(t)) return t;
-      return `<p>${inline(esc(t))}</p>`;
+      const lines = chunk.split('\n');
+      const out = [];
+      const buf = [];
+      let inHtml = false;
+      const singleLineHtml = /^\s*<[^>]+>.*<\/[^>]+>\s*$/; // e.g. <h2>Title</h2> on one line
+
+      function flushBuf() {
+        const t = buf.join('\n').trim();
+        if (t) out.push(`${inline(esc(t))}`);
+        buf.length = 0;
+      }
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        const startsHtmlBlock = blockHtmlBoundary.test(trimmed);
+        if (startsHtmlBlock) {
+          flushBuf();
+          out.push(line);
+          // If the tag opens and closes on the same line (like <h2>...</h2>), do NOT enter HTML mode
+          if (singleLineHtml.test(trimmed)) {
+            inHtml = false;
+          } else {
+            inHtml = true;
+          }
+          if (/^<\//.test(trimmed)) inHtml = false; // closing tag ends block without needing a blank line
+          continue;
+        }
+        if (inHtml) {
+           out.push(line);
+           if (!trimmed) inHtml = false; // blank line closes HTML block
+           continue;
+        }
+        buf.push(line);
+      }
+
+      flushBuf();
+      return out.join('\n');
     })
     .join('\n');
 
@@ -6972,6 +7006,10 @@ text = text.replace(/§§CODESPAN\d+§§/g, '<code></code>');
     s = s.replace(/\*([^*]+?)\*/g, '<em>$1</em>');
     s = s.replace(/_([^_]+?)_/g, '<em>$1</em>');
     s = s.replace(/~~([^~]+?)~~/g, '<del>$1</del>');
+    // Fallback: catch any remaining bold/italics even if unusual punctuation was involved
+    s = s.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong><em>$1</em></strong>');
+    s = s.replace(/__([\s\S]+?)__/g, '<strong>$1</strong>');
 
     // F) Do NOT restore here — only once at the end
     return s;
