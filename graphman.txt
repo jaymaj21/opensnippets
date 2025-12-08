@@ -2,6 +2,8 @@
 // graphman.js - DOT loader/merger in pure Node.js (no deps)
 
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { spawnSync } = require('child_process');
 
 function usage() {
@@ -29,6 +31,11 @@ Building graphs:
   add-nodes <id>|<prefix:start:end>    Add a node or a range (e.g., nx:1:3 -> nx1,nx2,nx3).
   add-edges <label> <fromRe> <toRe>    Add edges for all pairs matching regexes (directed if graph is digraph).
   add-edges <count> <fromRe> <toRe> [label]  Add up to <count> random distinct pairs.
+  add-chain <root> <n>                 Add nodes root_1..root_n and chain edges between them.
+  add-ring <root> <n> [start]          Add chain and close the ring from last to first.
+  add-grid <root> <rows> <cols> [start] Add a rows x cols grid with nodes root_i_j (i,j start at start).
+  add-clique <root> <n> [start]        Add complete graph on nodes root_{start..start+n-1}.
+  add-nodes <count> <root> [start]     Add count isolated nodes root_start ... root_{start+count-1}.
   delete-isolated-nodes                 Drop nodes with no incident edges.
   remove-nodes <regex>                  Delete nodes matching regex (and incident edges).
   remove-edges-between-nodes <fromRe> <toRe>  Delete edges whose tail/head match regexes.
@@ -38,6 +45,17 @@ Path-based operations:
   remove-paths <fromRe> <toRe>          Mark nodes/edges on such paths as remove.
   keep-path-edges <fromRe> <toRe>       Mark only edges on such paths as keep.
   remove-path-edges <fromRe> <toRe>     Mark only edges on such paths as remove.
+  filter-to-paths <fromRe> <toRe>       Keep only nodes/edges on such paths; mark all others remove.
+  select-nodes-on-paths <fromRe> <toRe> Select all nodes on such paths.
+  select-edges-on-paths <fromRe> <toRe> Select all edges on such paths.
+  find-path <regex> <label>             Use greggle to annotate one path matching regex with label.
+  select-neighbours [in|out|both] <hops> Expand selection via BFS over neighbors (default both,1).
+  select-nodes-degree <lt|le|eq|ge|gt> <k> Select nodes by total degree (in+out for digraphs).
+  select-component-of-nodes <regex>     Select all nodes/edges in components of matching nodes.
+  select-components-with-selected       Select all nodes/edges in components containing selected nodes.
+  clear-selection                       Clear selection on all nodes/edges.
+  invert-selection-nodes                Flip selection flag on nodes.
+  invert-selection-edges                Flip selection flag on edges.
   add-labels-to-edges-on-paths <fromRe> <toRe> <label>    Append label to edges on such paths.
   remove-labels-from-edges-on-paths <fromRe> <toRe> <label> Remove label from edges on such paths.
 
@@ -50,6 +68,13 @@ Selection and bulk edits:
   delete-selected                       Delete selected nodes (and incident edges) and selected edges.
   add-labels-to-selected <label>        Append label to all selected nodes/edges (comma separated).
   remove-labels-from-selected <label>   Remove label from selected nodes/edges (drops attr if empty).
+  select-nodes-label <labelRe>          Select nodes whose label attribute has a matching component.
+  set-node-attr-on-selected <attr> <value>   Set DOT attribute on selected nodes.
+  set-edge-attr-on-selected <attr> <value>   Set DOT attribute on selected edges.
+  unset-node-attr-on-selected <attr>         Remove DOT attribute from selected nodes.
+  unset-edge-attr-on-selected <attr>         Remove DOT attribute from selected edges.
+  clear-visual-attrs-on-selected             Remove common visual attrs (color, fillcolor, fontcolor,
+                                             style, shape, penwidth, arrowsize, fontsize) on selected.
 
 Labels:
   add-labels-to-selected / add-labels-to-edges-on-paths accept/emit comma-separated labels.
@@ -94,7 +119,10 @@ const edgeKey = (t, h, dir, tp = '', hp = '') => `${t}:${tp}->${h}:${hp}:${dir}`
 
 function ensureNodeObj(graph, id) {
   if (!graph.nodes.has(id)) {
-    graph.nodes.set(id, { attrs: Object.assign({}, graph.nodeDefaults), keep: false, remove: false, selected: false });
+    graph.nodes.set(id, { id, attrs: Object.assign({}, graph.nodeDefaults), keep: false, remove: false, selected: false });
+  } else {
+    const obj = graph.nodes.get(id);
+    obj.id = id;
   }
   return graph.nodes.get(id);
 }
@@ -539,11 +567,77 @@ function edgesOnPaths(graph, fromRe, toRe) {
   return out;
 }
 
+function bfsWithHops(startSet, nextFn, maxHops) {
+  const seen = new Set(startSet);
+  let frontier = new Set(startSet);
+  for (let hop = 0; hop < maxHops; hop++) {
+    const nextFrontier = new Set();
+    for (const u of frontier) {
+      for (const v of nextFn(u)) {
+        if (!seen.has(v)) {
+          seen.add(v);
+          nextFrontier.add(v);
+        }
+      }
+    }
+    if (!nextFrontier.size) break;
+    frontier = nextFrontier;
+  }
+  return seen;
+}
+
+function computeDegrees(graph) {
+  const deg = new Map();
+  for (const nid of graph.nodes.keys()) deg.set(nid, 0);
+  for (const e of graph.edges) {
+    deg.set(e.tail, (deg.get(e.tail) ?? 0) + 1);
+    deg.set(e.head, (deg.get(e.head) ?? 0) + 1);
+  }
+  return deg;
+}
+
+function buildUndirectedAdj(graph) {
+  const und = new Map();
+  const add = (a, b) => {
+    if (!und.has(a)) und.set(a, new Set());
+    und.get(a).add(b);
+  };
+  for (const nid of graph.nodes.keys()) und.set(nid, new Set());
+  for (const e of graph.edges) {
+    add(e.tail, e.head);
+    add(e.head, e.tail);
+  }
+  return und;
+}
+
+function componentFromSeed(seed, undirectedAdj) {
+  const seen = new Set([seed]);
+  const q = [seed];
+  while (q.length) {
+    const u = q.shift();
+    const nbrs = undirectedAdj.get(u) || new Set();
+    for (const v of nbrs) {
+      if (!seen.has(v)) {
+        seen.add(v);
+        q.push(v);
+      }
+    }
+  }
+  return seen;
+}
+
 function edgeMatchesLabelRegex(edge, re) {
   const lbl = edge.attrs.label ?? '';
   if (lbl === '') return false;
   const parts = lbl.split(',').map(s => s.trim()).filter(Boolean);
   return parts.some(p => re.test(p)) || re.test(lbl);
+}
+
+function nodeMatchesLabelRegex(nodeObj, re, idFallback) {
+  const lbl = nodeObj.attrs.label ?? '';
+  if (lbl === '') return false;
+  const { components } = parseNodeLabel(lbl, idFallback);
+  return components.some(c => re.test(c)) || re.test(lbl);
 }
 
 function appendLabelAttr(attrs, label) {
@@ -562,6 +656,101 @@ function removeLabelAttr(attrs, label) {
     attrs.label = filtered.join(',');
   } else {
     delete attrs.label;
+  }
+}
+
+function sampleRandom(list, count) {
+  const arr = [...list];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr.slice(0, count);
+}
+
+function runGreggleFindPath(graph, regexStr, label) {
+  // Serialize current graph to temp DOT
+  const tmpDir = os.tmpdir();
+  const tmpDot = path.join(tmpDir, `graphman_${Date.now()}_${Math.random().toString(16).slice(2)}.dot`);
+  try {
+    fs.writeFileSync(tmpDot, serializePlain(graph), 'utf8');
+  } catch (err) {
+    throw new Error(`find-path: failed to write temp DOT: ${err.message}`);
+  }
+  const exe = fs.existsSync(path.join(__dirname, 'greggle.exe'))
+    ? path.join(__dirname, 'greggle.exe')
+    : (fs.existsSync(path.join(__dirname, 'greggle')) ? path.join(__dirname, 'greggle') : 'greggle');
+  const query = `(find-path ${regexStr} ${label})`;
+  const res = spawnSync(exe, [tmpDot, query], { encoding: 'utf8' });
+  fs.unlink(tmpDot, () => {});
+  if (res.status !== 0) {
+    const msg = (res.stderr || res.stdout || '').toString();
+    throw new Error(`find-path (greggle) failed: ${msg.trim()}`);
+  }
+  const output = res.stdout.toString();
+  // Annotate edges that greggle marked with the label.
+  const seen = new Set();
+  output.split(/\r?\n/).forEach((line) => {
+    if (!line.includes('->') || !line.includes('label=')) return;
+    const arrowIdx = line.indexOf('->');
+    const left = line.substring(0, arrowIdx).trim().replace(/^"+|"+$/g, '');
+    const rest = line.substring(arrowIdx + 2).trim();
+    const destPart = rest.split(/[\[\s]/)[0].replace(/^"+|"+$/g, '');
+    const labelMatch = line.match(/label="([^"]*)"/);
+    if (!labelMatch) return;
+    if (labelMatch[1].includes(label)) {
+      const edge = graph.edges.find(e => e.tail === left && e.head === destPart);
+      if (edge) {
+        appendLabelAttr(edge.attrs, label);
+        seen.add(`${left}->${destPart}`);
+      }
+    }
+  });
+  if (!seen.size) {
+    throw new Error('find-path: no path annotated by greggle');
+  }
+  return graph;
+}
+
+function parseNodeLabel(labelStr, idFallback) {
+  if (!labelStr) return { prefix: idFallback || '', parts: [], components: idFallback ? [idFallback] : [] };
+  const [head, ...rest] = labelStr.split(':');
+  if (rest.length) {
+    const tail = rest.join(':');
+    const parts = tail ? tail.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const prefix = head || idFallback || '';
+    const components = [prefix, ...parts].filter(Boolean);
+    return { prefix, parts, components };
+  }
+  // no colon; treat whole string as comma list
+  const parts = head ? head.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const prefix = idFallback || '';
+  const components = prefix ? [prefix, ...parts] : parts;
+  return { prefix, parts, components };
+}
+
+function buildNodeLabel(prefix, parts) {
+  const pfx = prefix || '';
+  if (!parts.length) return pfx || undefined;
+  return `${pfx}:${parts.join(',')}`;
+}
+
+function appendNodeLabelAttr(nodeObj, id, label) {
+  const parsed = parseNodeLabel(nodeObj.attrs.label, id);
+  const parts = parsed.parts.slice();
+  if (!parts.includes(label)) parts.push(label);
+  const lbl = buildNodeLabel(parsed.prefix || id, parts);
+  if (lbl) nodeObj.attrs.label = lbl;
+}
+
+function removeNodeLabelAttr(nodeObj, id, label) {
+  const parsed = parseNodeLabel(nodeObj.attrs.label, id);
+  const parts = parsed.parts.filter(p => p !== label);
+  const lbl = buildNodeLabel(parsed.prefix || id, parts);
+  if (lbl) {
+    nodeObj.attrs.label = lbl;
+  } else {
+    delete nodeObj.attrs.label;
   }
 }
 
@@ -629,6 +818,34 @@ function serialize(graph) {
   return lines.join('\n');
 }
 
+function serializePlain(graph) {
+  const lines = [];
+  const op = graph.type === 'digraph' ? '->' : '--';
+  lines.push(`digraph ${quoteId(graph.name || 'G')} {`);
+  for (const nid of Object.keys(graph.nodes)) {
+    lines.push(`    ${quoteId(nid)};`);
+  }
+  for (const e of graph.edges) {
+    let tail = quoteId(e.tail);
+    let head = quoteId(e.head);
+    if (e.tailPort) tail += `:${e.tailPort}`;
+    if (e.headPort) head += `:${e.headPort}`;
+    const parts = [];
+    for (const k of Object.keys(e.attrs)) {
+      const v = e.attrs[k];
+      if (k === 'label') {
+        parts.push(`label="${v}"`);
+      } else {
+        parts.push(`${quoteId(k)}=${quoteAttrVal(v)}`);
+      }
+    }
+    const attrStr = parts.length ? ` [${parts.join(', ')}]` : '';
+    lines.push(`    ${tail} ${op} ${head}${attrStr};`);
+  }
+  lines.push('}');
+  return lines.join('\n');
+}
+
 // --- Subcommands ------------------------------------------------------------
 function expandRangeOrSingle(spec) {
   const m = /^([^:]+):(\d+):(\d+)$/.exec(spec);
@@ -664,7 +881,17 @@ function applyOne(graph, tokens) {
     }
     case 'add-nodes':
     case 'add-node': {
-      if (rest.length < 1) throw new Error('add-nodes <id>|<prefix:start:end>');
+      if (!rest.length) throw new Error('add-nodes arguments missing');
+      if (/^\d+$/.test(rest[0]) && rest.length >= 2) {
+        const count = parseInt(rest[0], 10);
+        const root = rest[1];
+        const start = rest.length >= 3 ? parseInt(rest[2], 10) : 1;
+        for (let i = 0; i < count; i++) {
+          const id = `${root}_${start + i}`;
+          addNode(graph, id, {}, graph.nodeDefaults);
+        }
+        return graph;
+      }
       const ids = expandRangeOrSingle(rest[0]);
       for (const id of ids) addNode(graph, id, {}, graph.nodeDefaults);
       return graph;
@@ -709,6 +936,100 @@ function applyOne(graph, tokens) {
       }
       return graph;
     }
+    case 'add-chain': {
+      if (rest.length < 2) throw new Error('add-chain <root> <n> [start]');
+      const root = rest[0];
+      const n = parseInt(rest[1], 10);
+      const start = rest.length >= 3 ? parseInt(rest[2], 10) : 1;
+      if (!Number.isInteger(n) || n < 1) throw new Error('add-chain n must be >= 1');
+      const dir = graph.type === 'digraph';
+      let prev = null;
+      for (let i = 0; i < n; i++) {
+        const id = `${root}_${start + i}`;
+        addNode(graph, id, {}, graph.nodeDefaults);
+        if (prev !== null) {
+          addEdge(graph, prev, id, dir, {}, graph.edgeDefaults);
+        }
+        prev = id;
+      }
+      return graph;
+    }
+    case 'add-ring': {
+      if (rest.length < 2) throw new Error('add-ring <root> <n> [start]');
+      const root = rest[0];
+      const n = parseInt(rest[1], 10);
+      const start = rest.length >= 3 ? parseInt(rest[2], 10) : 1;
+      if (!Number.isInteger(n) || n < 1) throw new Error('add-ring n must be >= 1');
+      const dir = graph.type === 'digraph';
+      const ids = [];
+      for (let i = 0; i < n; i++) {
+        const id = `${root}_${start + i}`;
+        ids.push(id);
+        addNode(graph, id, {}, graph.nodeDefaults);
+        if (i > 0) addEdge(graph, ids[i - 1], id, dir, {}, graph.edgeDefaults);
+      }
+      if (n > 1) addEdge(graph, ids[n - 1], ids[0], dir, {}, graph.edgeDefaults);
+      return graph;
+    }
+    case 'add-clique': {
+      if (rest.length < 2) throw new Error('add-clique <root> <n> [start]');
+      const root = rest[0];
+      const n = parseInt(rest[1], 10);
+      const start = rest.length >= 3 ? parseInt(rest[2], 10) : 1;
+      if (!Number.isInteger(n) || n < 1) throw new Error('add-clique n must be >= 1');
+      const dir = graph.type === 'digraph';
+      const ids = [];
+      for (let i = 0; i < n; i++) {
+        const id = `${root}_${start + i}`;
+        ids.push(id);
+        addNode(graph, id, {}, graph.nodeDefaults);
+      }
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          if (i === j) continue;
+          addEdge(graph, ids[i], ids[j], dir, {}, graph.edgeDefaults);
+        }
+      }
+      return graph;
+    }
+    case 'find-path': {
+      if (rest.length < 2) throw new Error('find-path <regex> <label>');
+      const label = rest[rest.length - 1];
+      const regexStr = rest.slice(0, rest.length - 1).join(' ');
+      const newGraph = runGreggleFindPath(graph, regexStr, label);
+      return newGraph;
+    }
+    case 'add-grid': {
+      if (rest.length < 3) throw new Error('add-grid <root> <rows> <cols> [start]');
+      const root = rest[0];
+      const rows = parseInt(rest[1], 10);
+      const cols = parseInt(rest[2], 10);
+      const start = rest.length >= 4 ? parseInt(rest[3], 10) : 1;
+      if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(cols) || cols < 1) {
+        throw new Error('add-grid rows and cols must be >= 1');
+      }
+      const dir = graph.type === 'digraph';
+      const nodes = [];
+      for (let i = 0; i < rows; i++) {
+        for (let j = 0; j < cols; j++) {
+          const id = `${root}_${start + i}_${start + j}`;
+          nodes.push(id);
+          addNode(graph, id, {}, graph.nodeDefaults);
+        }
+      }
+      const idx = (i, j) => `${root}_${start + i}_${start + j}`;
+      for (let i = 0; i < rows; i++) {
+        for (let j = 0; j < cols; j++) {
+          if (i < rows - 1) {
+            addEdge(graph, idx(i, j), idx(i + 1, j), dir, {}, graph.edgeDefaults);
+          }
+          if (j < cols - 1) {
+            addEdge(graph, idx(i, j), idx(i, j + 1), dir, {}, graph.edgeDefaults);
+          }
+        }
+      }
+      return graph;
+    }
     case 'keep-paths': {
       if (rest.length < 2) throw new Error('keep-paths <fromRegex> <toRegex>');
       const [a, b] = rest;
@@ -735,11 +1056,205 @@ function applyOne(graph, tokens) {
       for (const e of edges) markItem(e, 'remove');
       return graph;
     }
+    case 'select-nodes-on-paths': {
+      if (rest.length < 2) throw new Error('select-nodes-on-paths <fromRegex> <toRegex>');
+      const [a, b] = rest;
+      const nodes = Array.from(graph.nodes.keys());
+      const { adj, radj } = buildAdjacency(graph);
+      const sources = nodes.filter(n => new RegExp(a).test(n));
+      const targets = nodes.filter(n => new RegExp(b).test(n));
+      if (!sources.length || !targets.length) return graph;
+      const reachFromSrc = bfs(sources, adj);
+      const reachToTgt = bfs(targets, radj);
+      for (const n of nodes) {
+        if (reachFromSrc.has(n) && reachToTgt.has(n)) {
+          const obj = graph.nodes.get(n);
+          if (obj) obj.selected = true;
+        }
+      }
+      return graph;
+    }
+    case 'select-edges-on-paths': {
+      if (rest.length < 2) throw new Error('select-edges-on-paths <fromRegex> <toRegex>');
+      const [a, b] = rest;
+      const edges = edgesOnPaths(graph, new RegExp(a), new RegExp(b));
+      for (const e of edges) e.selected = true;
+      return graph;
+    }
+    case 'select-random-nodes': {
+      if (rest.length < 2) throw new Error('select-random-nodes <n> <regex>');
+      const n = parseInt(rest[0], 10);
+      const re = new RegExp(rest[1]);
+      const candidates = Array.from(graph.nodes.entries()).filter(([id]) => re.test(id));
+      const take = n >= candidates.length ? candidates : sampleRandom(candidates, n);
+      for (const [id, obj] of take) obj.selected = true;
+      return graph;
+    }
+    case 'select-random-edges': {
+      if (rest.length < 3) throw new Error('select-random-edges <n> <fromRegex> <toRegex>');
+      const n = parseInt(rest[0], 10);
+      const fromRe = new RegExp(rest[1]);
+      const toRe = new RegExp(rest[2]);
+      const candidates = graph.edges.filter(e => fromRe.test(e.tail) && toRe.test(e.head));
+      const take = n >= candidates.length ? candidates : sampleRandom(candidates, n);
+      for (const e of take) e.selected = true;
+      return graph;
+    }
+    case 'select-neighbours':
+    case 'select-neighbors': { // alias
+      if (!rest.length) {
+        rest.push('both', '1');
+      }
+      let mode = 'both';
+      let hops = 1;
+      if (rest.length === 1) {
+        if (/^\d+$/.test(rest[0])) {
+          hops = parseInt(rest[0], 10);
+        } else {
+          mode = rest[0];
+        }
+      } else {
+        mode = rest[0];
+        hops = parseInt(rest[1], 10);
+      }
+      if (!['in', 'out', 'both'].includes(mode)) throw new Error('select-neighbours mode must be in|out|both');
+      if (!Number.isInteger(hops) || hops < 0) throw new Error('select-neighbours hops must be non-negative integer');
+
+      const selectedNodes = new Set(Array.from(graph.nodes.entries()).filter(([, n]) => n.selected).map(([id]) => id));
+      if (!selectedNodes.size) return graph;
+
+      const { adj, radj } = buildAdjacency(graph);
+      const nextFn = (u) => {
+        if (mode === 'in') return radj.get(u) || new Set();
+        if (mode === 'out') return adj.get(u) || new Set();
+        // both: union
+        const out = adj.get(u) || new Set();
+        const inn = radj.get(u) || new Set();
+        return new Set([...out, ...inn]);
+      };
+      const reached = bfsWithHops(selectedNodes, nextFn, hops);
+      for (const id of reached) {
+        const obj = graph.nodes.get(id);
+        if (obj) obj.selected = true;
+      }
+      return graph;
+    }
+    case 'select-nodes-degree': {
+      if (rest.length < 2) throw new Error('select-nodes-degree <lt|le|eq|ge|gt> <k>');
+      const cmp = rest[0];
+      const k = parseInt(rest[1], 10);
+      if (!['lt', 'le', 'eq', 'ge', 'gt'].includes(cmp)) throw new Error('select-nodes-degree comparator must be lt|le|eq|ge|gt');
+      if (!Number.isInteger(k)) throw new Error('select-nodes-degree k must be integer');
+      const deg = computeDegrees(graph);
+      const check = (v) => {
+        switch (cmp) {
+          case 'lt': return v < k;
+          case 'le': return v <= k;
+          case 'eq': return v === k;
+          case 'ge': return v >= k;
+          case 'gt': return v > k;
+        }
+      };
+      for (const [id, obj] of graph.nodes.entries()) {
+        if (check(deg.get(id) ?? 0)) obj.selected = true;
+      }
+      return graph;
+    }
+    case 'select-component-of-nodes': {
+      if (rest.length < 1) throw new Error('select-component-of-nodes <regex>');
+      const re = new RegExp(rest[0]);
+      const und = buildUndirectedAdj(graph);
+      const seeds = Array.from(graph.nodes.keys()).filter(id => re.test(id));
+      const seenComps = new Set();
+      for (const seed of seeds) {
+        if (seenComps.has(seed)) continue;
+        const comp = componentFromSeed(seed, und);
+        for (const n of comp) {
+          const obj = graph.nodes.get(n);
+          if (obj) obj.selected = true;
+        }
+        for (const e of graph.edges) {
+          if (comp.has(e.tail) && comp.has(e.head)) e.selected = true;
+        }
+        for (const n of comp) seenComps.add(n);
+      }
+      return graph;
+    }
+    case 'select-components-with-selected': {
+      const und = buildUndirectedAdj(graph);
+      const seeds = Array.from(graph.nodes.entries()).filter(([, obj]) => obj.selected).map(([id]) => id);
+      const seen = new Set();
+      for (const seed of seeds) {
+        if (seen.has(seed)) continue;
+        const comp = componentFromSeed(seed, und);
+        for (const n of comp) {
+          const obj = graph.nodes.get(n);
+          if (obj) obj.selected = true;
+        }
+        for (const e of graph.edges) {
+          if (comp.has(e.tail) && comp.has(e.head)) e.selected = true;
+        }
+        for (const n of comp) seen.add(n);
+      }
+      return graph;
+    }
+    case 'clear-selection': {
+      for (const [, obj] of graph.nodes) obj.selected = false;
+      for (const e of graph.edges) e.selected = false;
+      return graph;
+    }
+    case 'invert-selection-nodes': {
+      for (const [, obj] of graph.nodes) obj.selected = !obj.selected;
+      return graph;
+    }
+    case 'invert-selection-edges': {
+      for (const e of graph.edges) e.selected = !e.selected;
+      return graph;
+    }
+    case 'filter-to-paths': {
+      if (rest.length < 2) throw new Error('filter-to-paths <fromRegex> <toRegex>');
+      const [a, b] = rest;
+      const nodes = Array.from(graph.nodes.keys());
+      const { adj, radj } = buildAdjacency(graph);
+      const sources = nodes.filter(n => new RegExp(a).test(n));
+      const targets = nodes.filter(n => new RegExp(b).test(n));
+      if (!sources.length || !targets.length) {
+        // nothing matches; remove everything
+        graph.nodes.forEach(n => markItem(n, 'remove'));
+        graph.edges.forEach(e => markItem(e, 'remove'));
+        return graph;
+      }
+      const reachFromSrc = bfs(sources, adj);
+      const reachToTgt = bfs(targets, radj);
+      const nodeOnPath = new Set(nodes.filter(n => reachFromSrc.has(n) && reachToTgt.has(n)));
+      // mark all nodes/edges remove, then unmark keep on path ones
+      for (const [, n] of graph.nodes) markItem(n, 'remove');
+      for (const e of graph.edges) markItem(e, 'remove');
+      for (const n of nodeOnPath) {
+        const obj = graph.nodes.get(n);
+        if (obj) markItem(obj, 'keep');
+      }
+      for (const e of graph.edges) {
+        if (reachFromSrc.has(e.tail) && reachToTgt.has(e.head) &&
+            nodeOnPath.has(e.tail) && nodeOnPath.has(e.head)) {
+          markItem(e, 'keep');
+        }
+      }
+      return graph;
+    }
     case 'select-nodes': {
       if (rest.length < 1) throw new Error('select-nodes <regex>');
       const re = new RegExp(rest[0]);
       for (const [id, obj] of graph.nodes.entries()) {
         if (re.test(id)) obj.selected = true;
+      }
+      return graph;
+    }
+    case 'select-nodes-label': {
+      if (rest.length < 1) throw new Error('select-nodes-label <labelRegex>');
+      const re = new RegExp(rest[0]);
+      for (const [id, obj] of graph.nodes.entries()) {
+        if (nodeMatchesLabelRegex(obj, re, id)) obj.selected = true;
       }
       return graph;
     }
@@ -798,8 +1313,8 @@ function applyOne(graph, tokens) {
     case 'add-labels-to-selected': {
       if (rest.length < 1) throw new Error('add-labels-to-selected <label>');
       const label = rest[0];
-      for (const [, n] of graph.nodes.entries()) {
-        if (n.selected) appendLabelAttr(n.attrs, label);
+      for (const [id, n] of graph.nodes.entries()) {
+        if (n.selected) appendNodeLabelAttr(n, id, label);
       }
       for (const e of graph.edges) {
         if (e.selected) appendLabelAttr(e.attrs, label);
@@ -809,11 +1324,53 @@ function applyOne(graph, tokens) {
     case 'remove-labels-from-selected': {
       if (rest.length < 1) throw new Error('remove-labels-from-selected <label>');
       const label = rest[0];
-      for (const [, n] of graph.nodes.entries()) {
-        if (n.selected) removeLabelAttr(n.attrs, label);
+      for (const [id, n] of graph.nodes.entries()) {
+        if (n.selected) removeNodeLabelAttr(n, id, label);
       }
       for (const e of graph.edges) {
         if (e.selected) removeLabelAttr(e.attrs, label);
+      }
+      return graph;
+    }
+    case 'set-node-attr-on-selected': {
+      if (rest.length < 2) throw new Error('set-node-attr-on-selected <attr> <value>');
+      const [attr, value] = rest;
+      for (const [, n] of graph.nodes.entries()) {
+        if (n.selected) n.attrs[attr] = value;
+      }
+      return graph;
+    }
+    case 'set-edge-attr-on-selected': {
+      if (rest.length < 2) throw new Error('set-edge-attr-on-selected <attr> <value>');
+      const [attr, value] = rest;
+      for (const e of graph.edges) {
+        if (e.selected) e.attrs[attr] = value;
+      }
+      return graph;
+    }
+    case 'unset-node-attr-on-selected': {
+      if (rest.length < 1) throw new Error('unset-node-attr-on-selected <attr>');
+      const attr = rest[0];
+      for (const [, n] of graph.nodes.entries()) {
+        if (n.selected) delete n.attrs[attr];
+      }
+      return graph;
+    }
+    case 'unset-edge-attr-on-selected': {
+      if (rest.length < 1) throw new Error('unset-edge-attr-on-selected <attr>');
+      const attr = rest[0];
+      for (const e of graph.edges) {
+        if (e.selected) delete e.attrs[attr];
+      }
+      return graph;
+    }
+    case 'clear-visual-attrs-on-selected': {
+      const vis = ['color', 'fillcolor', 'fontcolor', 'style', 'shape', 'penwidth', 'arrowsize', 'fontsize'];
+      for (const [, n] of graph.nodes.entries()) {
+        if (n.selected) vis.forEach(a => delete n.attrs[a]);
+      }
+      for (const e of graph.edges) {
+        if (e.selected) vis.forEach(a => delete e.attrs[a]);
       }
       return graph;
     }
@@ -898,7 +1455,8 @@ function applyOne(graph, tokens) {
         }
       }
       for (const subTokens of commands) {
-        applyOne(graph, subTokens);
+        const out = applyOne(graph, subTokens);
+        if (out) graph = out;
       }
       return graph;
     }
