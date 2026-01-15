@@ -5883,6 +5883,232 @@ function insertDownloadLinkAtSavedRange() {
 })();
 ///////////////////////////////////////////////////
 
+(() => {
+  function escapeMarkdownText(s) {
+    return s
+      .replace(/\\/g, '\\\\')
+      .replace(/`/g, '\\`')
+      .replace(/\*/g, '\\*')
+      .replace(/_/g, '\\_')
+      .replace(/\[/g, '\\[')
+      .replace(/\]/g, '\\]')
+      .replace(/#/g, '\\#');
+  }
+
+  function escapeTableCellText(s) {
+    return escapeMarkdownText(s).replace(/\|/g, '\\|').replace(/\n+/g, '<br>');
+  }
+
+  function extractTexFromMath(mathEl) {
+    const ann = mathEl.querySelector('annotation[encoding*="tex" i]');
+    if (ann && ann.textContent.trim()) return ann.textContent.trim();
+    const alt = mathEl.getAttribute('alttext') || mathEl.getAttribute('aria-label');
+    if (alt && alt.trim()) return alt.trim();
+    return null;
+  }
+
+  function isDisplayMathFromContext(mathEl) {
+    if (mathEl.getAttribute('display') === 'block') return true;
+    const cont = mathEl.closest('mjx-container, .katex-display, .math-display, div.display, span.display');
+    if (cont) {
+      if (cont.tagName === 'MJX-CONTAINER') {
+        return (cont.getAttribute('display') || '').toLowerCase() === 'true';
+      }
+      if (cont.classList.contains('katex-display') || cont.classList.contains('math-display')) return true;
+    }
+    return false;
+  }
+
+  function wrapInlineCode(text) {
+    const matches = text.match(/`+/g) || [];
+    const maxTicks = Math.max(0, ...matches.map(m => m.length));
+    const fence = '`'.repeat(maxTicks + 1);
+    const needsSpace = text.startsWith('`') || text.endsWith('`');
+    return fence + (needsSpace ? ' ' : '') + text + (needsSpace ? ' ' : '') + fence;
+  }
+
+  function listToMarkdown(listEl, depth, ordered) {
+    const indent = '  '.repeat(depth);
+    const items = Array.from(listEl.querySelectorAll(':scope > li'));
+    let out = '';
+    items.forEach((li, idx) => {
+      const bullet = ordered ? `${idx + 1}. ` : '- ';
+      let inline = '';
+      const nestedLists = [];
+      li.childNodes.forEach(child => {
+        if (child.nodeType === Node.ELEMENT_NODE) {
+          const tag = child.tagName.toLowerCase();
+          if (tag === 'ul' || tag === 'ol') {
+            nestedLists.push(child);
+            return;
+          }
+        }
+        inline += nodeToMarkdown(child, { depth });
+      });
+      const line = (inline || '').trim();
+      out += indent + bullet + line + '\n';
+      nestedLists.forEach(nested => {
+        out += listToMarkdown(nested, depth + 1, nested.tagName.toLowerCase() === 'ol');
+      });
+    });
+    return out + (depth === 0 ? '\n' : '');
+  }
+
+  function tableToMarkdown(tableEl) {
+    const rows = Array.from(tableEl.querySelectorAll(':scope > thead > tr, :scope > tbody > tr, :scope > tr'));
+    if (!rows.length) return '';
+
+    const rowCells = rows.map(r =>
+      Array.from(r.querySelectorAll(':scope > th, :scope > td')).map(c =>
+        escapeTableCellText(childrenToMarkdown(c).trim())
+      )
+    );
+    const colCount = Math.max(1, ...rowCells.map(cells => cells.length));
+    rowCells.forEach(cells => {
+      while (cells.length < colCount) cells.push('');
+    });
+
+    let header = rowCells[0];
+    let bodyStart = 1;
+    const hasExplicitHeader = rows[0].querySelectorAll(':scope > th').length > 0 ||
+      tableEl.querySelectorAll(':scope > thead > tr > th').length > 0;
+
+    if (!hasExplicitHeader && rowCells.length > 1) {
+      header = rowCells[0];
+    }
+
+    const separator = new Array(colCount).fill('---');
+    let out = `| ${header.join(' | ')} |\n| ${separator.join(' | ')} |\n`;
+
+    for (let i = bodyStart; i < rowCells.length; i++) {
+      out += `| ${rowCells[i].join(' | ')} |\n`;
+    }
+
+    return out + '\n';
+  }
+
+  function nodeToMarkdown(node, ctx = {}) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return escapeMarkdownText(node.nodeValue);
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+    const el = node;
+    const tag = el.tagName.toLowerCase();
+
+    if (tag === 'math') {
+      const tex = extractTexFromMath(el);
+      if (tex != null) {
+        return isDisplayMathFromContext(el) ? `$$\n${tex}\n$$` : `$${tex}$`;
+      }
+      return '[MATHML]';
+    }
+    if (tag === 'mjx-container') {
+      const m = el.querySelector('math');
+      if (m) return nodeToMarkdown(m, ctx);
+    }
+    if (tag === 'span' && el.classList.contains('katex')) {
+      const m = el.querySelector('.katex-mathml math');
+      if (m) return nodeToMarkdown(m, ctx);
+    }
+
+    if (tag === 'br') return '\n';
+    if (tag === 'p') return childrenToMarkdown(el).trimEnd() + '\n\n';
+    if (tag === 'div') return childrenToMarkdown(el).trimEnd() + '\n\n';
+
+    if (/^h[1-6]$/.test(tag)) {
+      const level = parseInt(tag.slice(1), 10);
+      const content = childrenToMarkdown(el).trim();
+      return '#'.repeat(level) + ' ' + content + '\n\n';
+    }
+
+    if (tag === 'strong' || tag === 'b') return `**${childrenToMarkdown(el)}**`;
+    if (tag === 'em' || tag === 'i') return `*${childrenToMarkdown(el)}*`;
+    if (tag === 'u') return `<u>${childrenToMarkdown(el)}</u>`;
+
+    if (tag === 'code' && el.closest('pre')) {
+      return el.textContent;
+    }
+    if (tag === 'code') {
+      const text = el.textContent.replace(/\n+/g, ' ');
+      return wrapInlineCode(text);
+    }
+    if (tag === 'pre') {
+      const text = el.textContent.replace(/\s+$/,'');
+      return `\n\`\`\`\n${text}\n\`\`\`\n\n`;
+    }
+
+    if (tag === 'blockquote') {
+      const content = childrenToMarkdown(el).trim();
+      const quoted = content.split('\n').map(line => '> ' + line).join('\n');
+      return quoted + '\n\n';
+    }
+
+    if (tag === 'ul' || tag === 'ol') {
+      return listToMarkdown(el, ctx.depth || 0, tag === 'ol');
+    }
+    if (tag === 'li') return childrenToMarkdown(el);
+
+    if (tag === 'a') {
+      const href = el.getAttribute('href') || '';
+      const text = childrenToMarkdown(el) || href;
+      return `[${text}](${href})`;
+    }
+    if (tag === 'img') {
+      const src = el.getAttribute('src') || '';
+      const alt = el.getAttribute('alt') || '';
+      return `![${escapeMarkdownText(alt)}](${src})`;
+    }
+
+    if (tag === 'table') {
+      return tableToMarkdown(el);
+    }
+
+    return childrenToMarkdown(el);
+  }
+
+  function childrenToMarkdown(el) {
+    let out = '';
+    el.childNodes.forEach(n => { out += nodeToMarkdown(n); });
+    return out;
+  }
+
+  function exportSelectionOrEditorToMarkdown() {
+    const editor = document.getElementById('editor');
+    if (!editor) throw new Error("No element with id='editor' found.");
+
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) {
+      const range = selection.getRangeAt(0);
+      if (editor.contains(range.commonAncestorContainer)) {
+        const container = document.createElement('div');
+        container.appendChild(range.cloneContents());
+        return childrenToMarkdown(container);
+      }
+    }
+    return childrenToMarkdown(editor);
+  }
+
+  window.exportEditorToMarkdown = function exportEditorToMarkdown() {
+    const editor = document.getElementById('editor');
+    if (!editor) throw new Error("No element with id='editor' found.");
+    return childrenToMarkdown(editor)
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  };
+
+  window.tomd = async function tomd() {
+    const md = exportSelectionOrEditorToMarkdown()
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    await navigator.clipboard.writeText(md);
+    alert(`Markdown copied to clipboard (${md.length} chars).`);
+  };
+})();
+///////////////////////////////////////////////////
+
 /**
  *
  * One-shot image point picker.
