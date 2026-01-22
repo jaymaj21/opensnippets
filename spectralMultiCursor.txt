@@ -444,6 +444,14 @@ function selectText(containerid) {
         .highlight7 {
             background-color: #ffffff;
         }
+        .md-table {
+            border-collapse: collapse;
+            border: 1px solid #ccc;
+        }
+        .md-table th, .md-table td {
+            border: 1px solid #ccc;
+            padding: 4px 6px;
+        }
 
         #searchBox1 {
             background-color: #f0f583;
@@ -853,7 +861,11 @@ let savedEditorRange = null;
 
         document.getElementById('editor').addEventListener('dblclick', function(event) {
             const selection = window.getSelection();
-            const word = selection.toString().trim();
+            let word = selection.toString().trim();
+            // For inline SVG text, selection can be empty; fall back to target text
+            if (!word && event.target && event.target.closest('svg')) {
+                word = (event.target.textContent || '').trim();
+            }
             if (word.length > 0) {
                 highlightRegexRobust( word ,0, false);
                 
@@ -916,12 +928,13 @@ let savedEditorRange = null;
     const editor = document.getElementById('editor');
     const isCaseInsensitive = document.getElementById('caseInsensitive')?.checked;
     const regexFlags = isCaseInsensitive ? 'gim' : 'gm';
-    const regex = new RegExp(pattern.length <= 3 ? '\\b' + pattern + '\\b' : pattern, regexFlags);
+    const regex = new RegExp(pattern, regexFlags);
 
     const hlColor = randomHilightColor();
 
     const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, null, false);
     const textNodes = [];
+    const svgGroups = new Map(); // container -> { nodes: [{node,start,end}], text: string }
     let textWithNewlines = '';
     let offset = 0;
     
@@ -953,11 +966,26 @@ let savedEditorRange = null;
     function traverse(node) {
         if (node.nodeType === Node.TEXT_NODE) {
             const text = node.textContent;
+            const isSvg = node.parentNode && node.parentNode.namespaceURI === 'http://www.w3.org/2000/svg';
             if (text.trim().length > 0) {
-                textNodes.push({ node, start: offset, end: offset + text.length });
+                if (isSvg) {
+                    const container = node.parentElement?.closest('text') || node.parentNode;
+                    let grp = svgGroups.get(container);
+                    if (!grp) {
+                        grp = { nodes: [], text: '' };
+                        svgGroups.set(container, grp);
+                    }
+                    const start = grp.text.length;
+                    grp.nodes.push({ node, start, end: start + text.length });
+                    grp.text += text;
+                } else {
+                    textNodes.push({ node, start: offset, end: offset + text.length });
+                }
             }
-            textWithNewlines += text;
-            offset += text.length;
+            if (!isSvg) {
+                textWithNewlines += text;
+                offset += text.length;
+            }
         } else if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
             const tag = node.tagName?.toLowerCase();
 
@@ -979,7 +1007,7 @@ let savedEditorRange = null;
 
     traverse(editor);
 
-    // Run regex match over text with virtual newlines
+    // Run regex match over text with virtual newlines for HTML/text content
     let match;
     while ((match = regex.exec(textWithNewlines)) !== null) {
         const matchStart = match.index;
@@ -1001,22 +1029,86 @@ let savedEditorRange = null;
         if (a.node === b.node) return b.spanStart - a.spanStart;
         return textNodes.indexOf(b.node) - textNodes.indexOf(a.node);
     });
-    
 
+    function isSvgTextNode(n) {
+        return n && n.nodeType === Node.TEXT_NODE && n.parentNode && n.parentNode.namespaceURI === 'http://www.w3.org/2000/svg';
+    }
+
+    function createSvgHighlight(node, spanStart, spanEnd, { color, colid, anchorId }) {
+        const text = node.textContent || '';
+        const before = text.slice(0, spanStart);
+        const mid = text.slice(spanStart, spanEnd);
+        const after = text.slice(spanEnd);
+        const parent = node.parentNode;
+        if (!parent) return null;
+
+        const frag = document.createDocumentFragment();
+        if (before) frag.appendChild(document.createTextNode(before));
+
+        const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+        tspan.textContent = mid;
+        tspan.setAttribute('data-spectral-svg-hl', '1');
+        if (colid != null) tspan.setAttribute('data-hl-colid', colid);
+        if (color) tspan.setAttribute('data-hl-color', color);
+
+        const fill = (parent instanceof Element) ? getComputedStyle(parent).fill : null;
+        if (fill) tspan.setAttribute('fill', fill);
+        tspan.setAttribute('stroke', color || hlColor);
+        tspan.setAttribute('paint-order', 'stroke');
+        tspan.setAttribute('stroke-width', '4px');
+        tspan.setAttribute('stroke-linejoin', 'round');
+        if (anchorId) tspan.id = anchorId;
+
+        frag.appendChild(tspan);
+        if (after) frag.appendChild(document.createTextNode(after));
+        parent.replaceChild(frag, node);
+        return tspan;
+    }
+
+    let colorFromButton = null;
+    if (colid >= 1 && colid <= 7) {
+        const sb = document.getElementById("searchBox"+colid);
+        colorFromButton = sb ? (sb.style.backgroundColor || getComputedStyle(sb).backgroundColor) : null;
+    }
+    const effectiveColor = colid === 0 ? hlColor : (colorFromButton || hlColor);
+
+    let totalMatches = highlights.length;
     highlights.forEach(({ node, spanStart, spanEnd }) => {
         const range = document.createRange();
+        range.setStart(node, spanStart);
+        range.setEnd(node, spanEnd);
+        const matchText = range.toString();
+        const isSvg = isSvgTextNode(node);
+
+        let anchorId = null;
+        if(showResultsListing && colid >= 1 && colid <= 7){
+            anchorId = `srch_${generateGUID()}`;
+        }
+
+        if (isSvg) {
+            const tspan = createSvgHighlight(node, spanStart, spanEnd, { color: effectiveColor, colid, anchorId });
+            if (showResultsListing && anchorId && tspan) {
+                ++ resultCount; 
+                resultListing.appendChild(document.createTextNode("#"+resultCount+"\t"));
+                const resultAnchor = document.createElement('a');
+                resultAnchor.href = `#${anchorId}`;
+                resultAnchor.innerText = matchText;
+                resultAnchor.style.display = 'inline';
+                resultAnchor.setAttribute("onclick","selectText('"+anchorId + "')");
+                resultListing.appendChild(resultAnchor);
+                resultListing.appendChild(document.createElement('br'));
+            }
+            return;
+        }
         
         const span = document.createElement('span');
 
         span.className = colid === 0 ? 'highlight' : 'highlight' + colid;
         if (colid >=1 && colid <= 7 ) {
-            span.style.backgroundColor = document.getElementById("searchBox"+colid).style.backgroundColor;
+            span.style.backgroundColor = colorFromButton;
         }
-        range.setStart(node, spanStart);
-        range.setEnd(node, spanEnd);
         
         if(showResultsListing && colid >= 1 && colid <= 7){
-            const anchorId = `srch_${generateGUID()}`;
             span.id = anchorId;
             
             var afterText = getTextFromRangeEndToNextNewline(range);
@@ -1075,11 +1167,43 @@ let savedEditorRange = null;
           // Special handling of underline removal
           if(removeUnderlineMode) removeUnderlineHelper('editor', range);
        }
-       
+
        range.surroundContents(span);
     });
 
-    setStatus(`${highlights.length} match(es) for pattern: ${pattern}`);
+    // SVG grouping scan: find matches across sibling text nodes within each <text> container
+    const svgRegex = new RegExp(regex.source, regex.flags);
+    svgGroups.forEach(grp => {
+        if (!grp.text) return;
+        svgRegex.lastIndex = 0;
+        let m;
+        while ((m = svgRegex.exec(grp.text)) !== null) {
+            const mStart = m.index;
+            const mEnd = m.index + m[0].length;
+            const anchorId = (showResultsListing && colid >=1 && colid <=7) ? `srch_${generateGUID()}` : null;
+            totalMatches++;
+            grp.nodes.forEach(({ node, start, end }) => {
+                if (end <= mStart || start >= mEnd) return;
+                const spanStart = Math.max(start, mStart) - start;
+                const spanEnd = Math.min(end, mEnd) - start;
+                const tspan = createSvgHighlight(node, spanStart, spanEnd, { color: effectiveColor, colid, anchorId });
+                void tspan;
+            });
+            if (showResultsListing && anchorId) {
+                ++ resultCount; 
+                resultListing.appendChild(document.createTextNode("#"+resultCount+"\t"));
+                const resultAnchor = document.createElement('a');
+                resultAnchor.href = `#${anchorId}`;
+                resultAnchor.innerText = m[0];
+                resultAnchor.style.display = 'inline';
+                resultAnchor.setAttribute("onclick","selectText('"+anchorId + "')");
+                resultListing.appendChild(resultAnchor);
+                resultListing.appendChild(document.createElement('br'));
+            }
+        }
+    });
+
+    setStatus(`${totalMatches} match(es) for pattern: ${pattern}`);
 }
 
 
@@ -1112,7 +1236,32 @@ document.getElementById('fileLoader').addEventListener('change', function(event)
         const contents = e.target.result;
         const editor = document.getElementById('editor');
 
-        if (file.type === 'text/html' || file.name.endsWith('.html')) {
+        const lowerName = file.name.toLowerCase();
+        const isSvg = file.type === 'image/svg+xml' || lowerName.endsWith('.svg');
+        if (isSvg) {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(contents, 'image/svg+xml');
+            const svg = doc.documentElement;
+            if (!svg || svg.tagName.toLowerCase() !== 'svg' || doc.querySelector('parsererror')) {
+                alert('Could not parse SVG.');
+                return;
+            }
+
+            // Strip scripts and inline event handlers for safety
+            svg.querySelectorAll('script').forEach(s => s.remove());
+            svg.querySelectorAll('*').forEach(el => {
+                Array.from(el.attributes).forEach(attr => {
+                    if (/^on/i.test(attr.name)) el.removeAttribute(attr.name);
+                });
+            });
+
+            const imported = document.importNode(svg, true);
+            editor.appendChild(imported);
+            setStatus('Loaded inline SVG into editor.');
+            return;
+        }
+
+        if (file.type === 'text/html' || lowerName.endsWith('.html')) {
             // Parse the HTML content
             const parser = new DOMParser();
             const doc = parser.parseFromString(contents, 'text/html');
@@ -4001,6 +4150,11 @@ function clearAllHighlight() {
     unwrapAll('.highlight');
     [1, 2, 3, 4, 5, 6, 7].forEach(x => unwrapAll('.highlight' + x));
 
+    // Remove SVG highlights (<tspan data-spectral-svg-hl>)
+    editor.querySelectorAll('tspan[data-spectral-svg-hl]').forEach(ts => {
+        ts.replaceWith(document.createTextNode(ts.textContent || ''));
+    });
+
     editor.normalize(); // clean up again
     setStatus("❌ All highlights removed.");
 }
@@ -5884,15 +6038,30 @@ function insertDownloadLinkAtSavedRange() {
 ///////////////////////////////////////////////////
 
 (() => {
+  // Escape once (idempotent) without re-escaping already escaped characters
   function escapeMarkdownText(s) {
-    return s
-      .replace(/\\/g, '\\\\')
-      .replace(/`/g, '\\`')
-      .replace(/\*/g, '\\*')
-      .replace(/_/g, '\\_')
-      .replace(/\[/g, '\\[')
-      .replace(/\]/g, '\\]')
-      .replace(/#/g, '\\#');
+    const specials = "\\`*_[]#";
+    let out = '';
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (ch === '\\') {
+        const next = s[i + 1];
+        if (next && specials.includes(next)) {
+          // already escaping a special char; keep as-is
+          out += '\\' + next;
+          i++; // skip next
+        } else {
+          out += '\\\\'; // escape literal backslash
+        }
+        continue;
+      }
+      if (specials.includes(ch)) {
+        out += '\\' + ch;
+      } else {
+        out += ch;
+      }
+    }
+    return out;
   }
 
   function escapeTableCellText(s) {
@@ -6105,6 +6274,23 @@ function insertDownloadLinkAtSavedRange() {
       .trim();
     await navigator.clipboard.writeText(md);
     alert(`Markdown copied to clipboard (${md.length} chars).`);
+  };
+
+  // Copy the first inline SVG in the editor to clipboard as SVG markup
+  window.svg2clipboard = async function svg2clipboard() {
+    try {
+      const svg = document.querySelector('#editor svg');
+      if (!svg) {
+        setStatus('No inline SVG found to copy.');
+        return;
+      }
+      const markup = svg.outerHTML;
+      await navigator.clipboard.writeText(markup);
+      setStatus('SVG copied to clipboard.');
+    } catch (err) {
+      console.error('svg2clipboard error', err);
+      setStatus('Failed to copy SVG: ' + err);
+    }
   };
 })();
 ///////////////////////////////////////////////////
@@ -7110,7 +7296,7 @@ function mdToHtml(md) {
         const tds = r.split('|').map(c => `<td>${inline(esc(c.trim()))}</td>`).join('');
         return `<tr>${tds}</tr>`;
       }).join('\n');
-      return `${pfx}<table>\n<thead><tr>${ths}</tr></thead>\n<tbody>\n${rows}\n</tbody>\n</table>\n`;
+      return `${pfx}<table class="md-table">\n<thead><tr>${ths}</tr></thead>\n<tbody>\n${rows}\n</tbody>\n</table>\n`;
     }
   );
 
@@ -7451,8 +7637,3 @@ Text Commands (Can be used with Javascript Eval):
 <script>hideTools()</script>
 </body>
 </html>
-
-
-
-
-
